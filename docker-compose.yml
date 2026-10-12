@@ -7,6 +7,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      # Read-only role for the MCP server, created by db/init/02_readonly_role.sql.
+      MCP_DB_USER: ${MCP_DB_USER:?Set MCP_DB_USER in .env}
+      MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?Set MCP_DB_PASSWORD in .env}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
