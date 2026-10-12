@@ -53,26 +53,51 @@ def post_json(path: str, payload: dict, timeout: float = 120) -> dict:
         raise OllamaError(f"Cannot reach Ollama at {ollama_url()} ({error}). Is Ollama running?") from error
 
 
-def embed(texts: list[str], prefix: str) -> list[list[float]]:
-    """Return one EMBED_DIMENSIONS-number vector per text."""
+def current_embedding_model() -> str:
+    """The admin setting, or the built-in default when settings cannot be read."""
+    try:
+        from chat.settings import load_settings
+
+        return str(load_settings()["embedding_model"])
+    except Exception:
+        return EMBED_MODEL
+
+
+def prefixes_for(model: str) -> tuple[str, str]:
+    """Document prefix and query prefix for this embedding model."""
+    name = model.split(":")[0]
+    if name == "nomic-embed-text":
+        return "search_document: ", "search_query: "
+    if name.startswith("qwen3-embedding"):
+        return DOCUMENT_PREFIX, QUERY_PREFIX
+    return "", ""
+
+
+def embed(texts: list[str], prefix: str, model: str | None = None) -> list[list[float]]:
+    """Return one vector per text. Every vector in the batch has the same length."""
     if not texts:
         return []
-    data = post_json("/api/embed", {"model": EMBED_MODEL, "input": [prefix + text for text in texts]})
+    chosen = model or current_embedding_model()
+    data = post_json("/api/embed", {"model": chosen, "input": [prefix + text for text in texts]})
     vectors = data.get("embeddings") or []
-    if len(vectors) != len(texts) or any(len(vector) != EMBED_DIMENSIONS for vector in vectors):
+    width = len(vectors[0]) if vectors else 0
+    if len(vectors) != len(texts) or width == 0 or any(len(vector) != width for vector in vectors):
         raise OllamaError(
-            f"Expected {len(texts)} embeddings of {EMBED_DIMENSIONS} numbers from {EMBED_MODEL}, "
-            f"got {len(vectors)}."
+            f"Expected {len(texts)} embeddings of the same length from {chosen}, got {len(vectors)}."
         )
     return vectors
 
 
-def embed_documents(texts: list[str]) -> list[list[float]]:
-    return embed(texts, DOCUMENT_PREFIX)
+def embed_documents(texts: list[str], model: str | None = None) -> list[list[float]]:
+    chosen = model or current_embedding_model()
+    document_prefix, _query_prefix = prefixes_for(chosen)
+    return embed(texts, document_prefix, model=chosen)
 
 
-def embed_query(text: str) -> list[float]:
-    return embed([text], QUERY_PREFIX)[0]
+def embed_query(text: str, model: str | None = None) -> list[float]:
+    chosen = model or current_embedding_model()
+    _document_prefix, query_prefix = prefixes_for(chosen)
+    return embed([text], query_prefix, model=chosen)[0]
 
 
 def to_pgvector(vector: list[float]) -> str:

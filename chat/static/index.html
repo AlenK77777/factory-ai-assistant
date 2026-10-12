@@ -13,89 +13,148 @@
       background: #eef1f4;
       color: #1c2430;
     }
-    main { max-width: 740px; margin: 0 auto; padding: 24px 16px 120px; }
+    .layout { display: flex; min-height: 100vh; }
+    .chat { flex: 1; min-width: 0; }
+    main { max-width: 740px; margin: 0 auto; padding: 24px 16px 130px; }
     h1 { font-size: 22px; margin: 0 0 4px; }
+    .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
     .note { color: #5c6b7a; margin: 0 0 16px; }
-    #banner {
+    #banner, .errors {
       display: none;
       background: #fde8e6;
       border: 1px solid #e3b2ac;
       color: #6d2018;
       padding: 10px 12px;
       border-radius: 8px;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
+    }
+    .warnings {
+      display: none;
+      background: #fff6dd;
+      border: 1px solid #e2c57a;
+      color: #5c4308;
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-bottom: 12px;
     }
     article { margin: 0 0 12px; }
     article.user { display: flex; justify-content: flex-end; }
-    .text {
-      white-space: pre-wrap;
-      padding: 10px 12px;
-      border-radius: 10px;
-      max-width: 90%;
-    }
+    .text { white-space: pre-wrap; padding: 10px 12px; border-radius: 10px; max-width: 90%; }
     article.user .text { background: #d9e7f7; }
     article.assistant .text { background: #fff; border: 1px solid #d5dbe3; }
     details { margin: 6px 0 0; font-size: 13px; color: #3d4b5c; }
     summary { cursor: pointer; }
-    pre {
+    pre, textarea.settings {
       white-space: pre-wrap;
       background: #fff;
       border: 1px solid #d5dbe3;
       border-radius: 8px;
       padding: 10px;
       overflow: auto;
+      font: 13px/1.4 Consolas, monospace;
     }
-    form {
+    #ask {
       position: fixed;
-      left: 0; right: 0; bottom: 0;
+      left: 0; bottom: 0;
       background: #eef1f4;
       border-top: 1px solid #d5dbe3;
       padding: 12px 16px;
     }
     .row { max-width: 740px; margin: 0 auto; display: flex; gap: 8px; }
-    textarea {
-      flex: 1;
-      resize: vertical;
-      min-height: 48px;
-      max-height: 140px;
-      font: inherit;
-      padding: 8px;
-      border: 1px solid #b7c0cb;
-      border-radius: 8px;
-    }
-    button {
-      font: inherit;
-      background: #1f4e79;
-      color: #fff;
-      border: 0;
-      border-radius: 8px;
-      padding: 0 16px;
-      cursor: pointer;
-    }
+    textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 140px; font: inherit; padding: 8px; border: 1px solid #b7c0cb; border-radius: 8px; }
+    button { font: inherit; background: #1f4e79; color: #fff; border: 0; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
+    button.secondary { background: #5c6b7a; }
     button:disabled { opacity: 0.6; cursor: default; }
+    aside {
+      width: 400px;
+      background: #fff8e8;
+      border-left: 4px solid #a15c07;
+      padding: 16px 14px 32px;
+      overflow: auto;
+      max-height: 100vh;
+    }
+    aside.collapsed { display: none; }
+    .badge {
+      display: inline-block;
+      background: #a15c07;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    aside h2 { font-size: 18px; margin: 8px 0; }
+    aside h3 { font-size: 15px; margin: 16px 0 8px; }
+    label { display: block; font-weight: 600; margin-top: 10px; }
+    .help, .range { display: block; font-weight: 400; color: #5c4a32; font-size: 13px; }
+    aside input, aside select, aside textarea { width: 100%; margin-top: 4px; font: inherit; padding: 6px; }
+    aside input[type="checkbox"] { width: auto; }
+    aside textarea { min-height: 140px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    #review { display: none; margin-top: 12px; }
+    .readonly { font-size: 13px; background: #fff; border: 1px solid #ead7b2; border-radius: 8px; padding: 8px; }
   </style>
 </head>
 <body>
-  <main>
-    <h1>Factory assistant</h1>
-    <p class="note">Ask about an order, defects, or a work instruction. English, Russian or Hebrew. Synthetic data.</p>
-    <div id="banner"></div>
-    <div id="log"></div>
-  </main>
-  <form id="form">
-    <div class="row">
-      <textarea id="question" dir="auto" placeholder="Type a question" aria-label="Question" required></textarea>
-      <button type="submit" id="send">Send</button>
+  <div class="layout">
+    <div class="chat">
+      <main>
+        <div class="top">
+          <h1>Factory assistant</h1>
+          <button type="button" id="toggle-admin" class="secondary">Admin panel</button>
+        </div>
+        <p class="note">Ask about an order, defects, or a work instruction. English, Russian or Hebrew. Synthetic data.</p>
+        <div id="banner"></div>
+        <div id="log"></div>
+      </main>
+      <form id="ask">
+        <div class="row">
+          <textarea id="question" dir="auto" placeholder="Type a question" aria-label="Question" required></textarea>
+          <button type="submit" id="send">Send</button>
+        </div>
+      </form>
     </div>
-  </form>
+    <aside id="admin">
+      <span class="badge">ADMIN</span>
+      <h2>Admin panel</h2>
+      <p class="help">These settings change the assistant on this computer. Passwords stay in .env and are not shown or edited here.</p>
+      <p id="version-line" class="help"></p>
+      <div id="settings-errors" class="errors"></div>
+      <div id="settings-warnings" class="warnings"></div>
+      <form id="settings-form"></form>
+      <div class="actions">
+        <button type="button" id="apply">Apply</button>
+        <button type="button" id="reset" class="secondary">Reset to defaults</button>
+      </div>
+      <div id="review">
+        <h3>What will change</h3>
+        <div id="review-body"></div>
+        <label id="confirm-wrap" style="display:none">
+          <input type="checkbox" id="confirm-reindex"> I understand this re-indexes the work instructions
+        </label>
+        <div class="actions">
+          <button type="button" id="confirm">Confirm apply</button>
+        </div>
+      </div>
+      <h3>Progress</h3>
+      <pre id="progress" dir="auto">No change yet.</pre>
+      <h3>This computer</h3>
+      <div id="readonly" class="readonly"></div>
+    </aside>
+  </div>
   <script>
     const log = document.getElementById("log");
     const banner = document.getElementById("banner");
-    const form = document.getElementById("form");
+    const ask = document.getElementById("ask");
     const question = document.getElementById("question");
     const send = document.getElementById("send");
-    const conversationId = localStorage.getItem("factory-chat-id") || crypto.randomUUID();
+    const admin = document.getElementById("admin");
+    const form = document.getElementById("settings-form");
+    let conversationId = localStorage.getItem("factory-chat-id") || crypto.randomUUID();
     localStorage.setItem("factory-chat-id", conversationId);
+    let spec = null;
+    let pendingValues = null;
 
     function showBanner(text) {
       banner.style.display = "block";
@@ -126,7 +185,7 @@
     }
 
     function formatTrace(meta) {
-      const lines = ["Model: " + meta.model, "Time: " + meta.elapsed_s + " s"];
+      const lines = ["Settings version: " + meta.settings_version, "Model: " + meta.model, "Time: " + meta.elapsed_s + " s"];
       if (!meta.tools.length) lines.push("No tools were called.");
       for (const tool of meta.tools) {
         lines.push("");
@@ -139,12 +198,189 @@
         const rows = tool.result && tool.result.results;
         if (Array.isArray(rows)) {
           lines.push("Sources:");
-          for (const row of rows) {
-            lines.push("  " + row.source + "  similarity " + row.similarity);
-          }
+          for (const row of rows) lines.push("  " + row.source + "  similarity " + row.similarity);
         }
       }
       return lines.join("\n");
+    }
+
+    function resetConversation() {
+      log.textContent = "";
+      conversationId = crypto.randomUUID();
+      localStorage.setItem("factory-chat-id", conversationId);
+    }
+
+    function fieldRange(field) {
+      const bits = ["Default: " + (field.kind === "textarea" ? "(the measured prompt)" : String(field.default))];
+      if (field.minimum != null) bits.push("Allowed: " + field.minimum + " to " + field.maximum);
+      if (field.options && field.options.length) bits.push("Allowed: " + field.options.join(", "));
+      return bits.join(". ") + ".";
+    }
+
+    function buildForm() {
+      form.textContent = "";
+      let group = "";
+      for (const field of spec.fields) {
+        if (field.group !== group) {
+          group = field.group;
+          const heading = document.createElement("h3");
+          heading.textContent = group;
+          form.appendChild(heading);
+        }
+        const label = document.createElement("label");
+        label.textContent = field.label;
+        const help = document.createElement("span");
+        help.className = "help";
+        help.textContent = field.help;
+        const range = document.createElement("span");
+        range.className = "range";
+        range.textContent = fieldRange(field);
+        label.appendChild(help);
+        label.appendChild(range);
+        let input;
+        if (field.kind === "bool") {
+          input = document.createElement("input");
+          input.type = "checkbox";
+        } else if (field.kind === "textarea") {
+          input = document.createElement("textarea");
+          input.className = "settings";
+        } else if (field.kind === "model" || field.kind === "select") {
+          input = document.createElement("select");
+          const options = field.kind === "model" ? spec.models.slice() : field.options.slice();
+          const current = spec.values[field.key];
+          if (current && !options.includes(current)) options.unshift(current);
+          for (const option of options) {
+            const item = document.createElement("option");
+            item.value = option;
+            item.textContent = option;
+            input.appendChild(item);
+          }
+        } else {
+          input = document.createElement("input");
+          input.type = field.kind === "number" ? "number" : "text";
+          if (field.minimum != null) input.min = field.minimum;
+          if (field.maximum != null) input.max = field.maximum;
+          if (field.step != null) input.step = field.step;
+        }
+        input.id = "setting-" + field.key;
+        input.dataset.key = field.key;
+        input.dataset.kind = field.kind;
+        label.appendChild(input);
+        form.appendChild(label);
+      }
+      fill(spec.values);
+      document.getElementById("version-line").textContent = "Settings version " + spec.version;
+      const info = spec.readonly;
+      const gpu = info.gpu_models.length
+        ? info.gpu_models.map(model => model.name + (model.vram_mb != null ? " (" + model.vram_mb + " MB VRAM)" : "")).join(", ")
+        : "No model is loaded in GPU memory right now.";
+      const tools = info.mcp_tools.length
+        ? info.mcp_tools.map(tool => tool.name).join(", ")
+        : "MCP server is not connected.";
+      document.getElementById("readonly").textContent =
+        "Database: " + info.database_host + ":" + info.database_port +
+        "\nMCP tools: " + tools +
+        "\nLoaded in GPU: " + gpu;
+    }
+
+    function fill(values) {
+      for (const input of form.querySelectorAll("[data-key]")) {
+        const value = values[input.dataset.key];
+        if (input.dataset.kind === "bool") input.checked = Boolean(value);
+        else input.value = value;
+      }
+    }
+
+    function readForm() {
+      const values = {};
+      for (const input of form.querySelectorAll("[data-key]")) {
+        if (input.dataset.kind === "bool") values[input.dataset.key] = input.checked;
+        else if (input.dataset.kind === "number") values[input.dataset.key] = input.value === "" ? null : Number(input.value);
+        else values[input.dataset.key] = input.value;
+      }
+      return values;
+    }
+
+    function showNotes(id, notes) {
+      const box = document.getElementById(id);
+      box.style.display = notes.length ? "block" : "none";
+      box.textContent = notes.join("\n");
+    }
+
+    async function preview(values) {
+      pendingValues = values;
+      document.getElementById("review").style.display = "none";
+      const response = await fetch("/api/settings/preview", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({values}),
+      });
+      const result = await response.json();
+      showNotes("settings-errors", result.errors || (result.error ? [result.error] : []));
+      showNotes("settings-warnings", result.warnings || []);
+      if (!result.ok) return;
+      const lines = result.changes.length
+        ? result.changes.map(change => change.label + ": " + change.before + " → " + change.after + (change.reindex ? " (re-index)" : ""))
+        : ["Nothing will change."];
+      if (result.needs_reindex) {
+        lines.push("These indexing changes rebuild every work-instruction chunk.");
+      }
+      if (result.check_vector_size) {
+        lines.push("The embedding model changed. The vector size will be checked, and the table migrated if it differs, before re-indexing.");
+      }
+      document.getElementById("review-body").textContent = lines.join("\n");
+      document.getElementById("confirm-wrap").style.display = result.needs_reindex ? "block" : "none";
+      document.getElementById("confirm-reindex").checked = false;
+      document.getElementById("review").style.display = "block";
+    }
+
+    async function applySettings() {
+      const confirmReindex = document.getElementById("confirm-reindex").checked;
+      document.getElementById("apply").disabled = true;
+      document.getElementById("confirm").disabled = true;
+      document.getElementById("progress").textContent = "";
+      const response = await fetch("/api/settings/apply", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({values: pendingValues, confirm_reindex: confirmReindex}),
+      });
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const data = await response.json();
+        if (data.unchanged) document.getElementById("progress").textContent = "Nothing changed. Settings version " + data.version + ".";
+        else showNotes("settings-errors", [data.error || "Apply failed."]);
+        document.getElementById("apply").disabled = false;
+        document.getElementById("confirm").disabled = false;
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const step = await reader.read();
+        if (step.done) break;
+        buffer += decoder.decode(step.value, {stream: true});
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          document.getElementById("progress").textContent += (event.message || event.stage) + "\n";
+          if (event.stage === "done") {
+            resetConversation();
+            await loadSettings();
+          }
+          if (event.stage === "error") showNotes("settings-errors", [event.message]);
+        }
+      }
+      document.getElementById("apply").disabled = false;
+      document.getElementById("confirm").disabled = false;
+    }
+
+    async function loadSettings() {
+      const response = await fetch("/api/settings");
+      spec = await response.json();
+      buildForm();
     }
 
     async function checkHealth() {
@@ -157,7 +393,22 @@
       }
     }
 
-    form.addEventListener("submit", async (event) => {
+    document.getElementById("toggle-admin").addEventListener("click", () => {
+      const hidden = admin.classList.toggle("collapsed");
+      document.getElementById("ask").style.right = hidden ? "0" : "400px";
+    });
+    document.getElementById("ask").style.right = "400px";
+
+    document.getElementById("apply").addEventListener("click", () => preview(readForm()));
+    document.getElementById("reset").addEventListener("click", () => {
+      const defaults = {};
+      for (const field of spec.fields) defaults[field.key] = field.default;
+      fill(defaults);
+      preview(defaults);
+    });
+    document.getElementById("confirm").addEventListener("click", applySettings);
+
+    ask.addEventListener("submit", async (event) => {
       event.preventDefault();
       const text = question.value.trim();
       if (!text) return;
@@ -167,8 +418,8 @@
       try {
         const response = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversation_id: conversationId, message: text }),
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({conversation_id: conversationId, message: text}),
         });
         const data = await response.json();
         if (!response.ok) {
@@ -187,11 +438,12 @@
     question.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
-        form.requestSubmit();
+        ask.requestSubmit();
       }
     });
 
     checkHealth();
+    loadSettings();
   </script>
 </body>
 </html>

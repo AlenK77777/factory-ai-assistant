@@ -36,23 +36,13 @@ class TurnResult:
     traces: list[ToolTrace] = field(default_factory=list)
 
 
-def system_prompt(language: Language) -> str:
-    """Rules for the plant chat. The language is fixed for this question."""
-    name = LANGUAGE_NAMES[language]
-    return f"""You are the assistant for employees of a PCB plant. The data and instructions are synthetic.
+def system_prompt(language: Language, template: str | None = None) -> str:
+    """Rules for the plant chat. {language} and {not_found} come from the question."""
+    if template is None:
+        from chat.settings import load_settings
 
-Write the answer in {name}.
-
-Rules:
-- Facts about orders, defects and work instructions come only from tool results in this conversation. Do not answer those facts from memory.
-- For an order or for defects, call get_order_status, list_late_orders or defect_summary.
-- For a question about what to do, a rule, a limit or a procedure, call search_instructions with the user's full question before you answer, even if the question seems unrelated to the plant.
-- Keep a fact from a tool separate from your own reading. Give the facts first. If you add an interpretation, put it after the facts and label it as your reading, not as a plant rule.
-- For a procedure, give only the 3 to 5 most important actions. If the excerpts list immediate actions, start with those. End with the source file name.
-- Keep the answer short.
-- If a tool says the order does not exist, or search_instructions has found=false, or the returned text does not answer the question, say so plainly. For a missing instruction use exactly: {NOT_FOUND[language]}
-- A follow-up refers to the earlier turns. Call a tool again when the follow-up needs data.
-"""
+        template = load_settings()["system_prompt"]
+    return template.replace("{language}", LANGUAGE_NAMES[language]).replace("{not_found}", NOT_FOUND[language])
 
 
 def parse_tool_call(call: dict) -> tuple[str, dict]:

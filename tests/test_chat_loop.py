@@ -149,3 +149,5 @@ def test_page_sets_direction_per_message():
     page = ( __import__("pathlib").Path(__file__).resolve().parent.parent / "chat" / "static" / "index.html").read_text(encoding="utf-8")
     assert 'dir="auto"' in page
     assert "How I got this" in page
+    assert "Admin panel" in page
+    assert "Settings version" in page

@@ -28,23 +28,28 @@ load_dotenv(ROOT / ".env")
 
 from chat.loop import run_turn  # noqa: E402
 from chat.mcp_bridge import McpBridge  # noqa: E402
+from chat.settings import field_specs, load_settings, review, reindex_confirmation_error, update_saved  # noqa: E402
 from rag.embeddings import OllamaError, ollama_url, post_json  # noqa: E402
+from rag.index_docs import index_documents  # noqa: E402
 from rag.language import detect_language  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 7777
-# Four earlier turns (user + assistant), enough for a follow-up.
-MAX_HISTORY_MESSAGES = 8
 STATIC_PAGE = Path(__file__).resolve().parent / "static" / "index.html"
 
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 bridge = McpBridge()
 conversations: dict[str, list[dict]] = {}
 conversations_lock = threading.Lock()
+apply_lock = threading.Lock()
+
+
+def chat_settings() -> dict:
+    return load_settings()
 
 
 def chat_model() -> str:
-    return os.getenv("OLLAMA_CHAT_MODEL", "qwen3:8b")
+    return str(chat_settings()["chat_model"])
 
 
 def ollama_problem() -> str | None:
@@ -63,16 +68,24 @@ def ollama_problem() -> str | None:
 
 
 def model_fn(messages: list[dict], tools: list[dict]) -> dict:
-    """One Ollama chat call with tools. Thinking is off so tool calls stay in tool_calls."""
+    """One Ollama chat call with the admin panel's model settings."""
+    settings = chat_settings()
+    think = bool(settings["think"])
     data = post_json(
         "/api/chat",
         {
-            "model": chat_model(),
+            "model": settings["chat_model"],
             "messages": messages,
             "tools": tools,
-            "think": False,
+            "think": think,
             "stream": False,
-            "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 1024},
+            "keep_alive": settings["keep_alive"],
+            # Thinking tokens count toward num_predict, so leave room when it is on.
+            "options": {
+                "temperature": settings["temperature"],
+                "num_ctx": settings["num_ctx"],
+                "num_predict": 4096 if think else 1024,
+            },
         },
         timeout=600,
     )
@@ -83,11 +96,68 @@ def model_fn(messages: list[dict], tools: list[dict]) -> dict:
 
 
 def remember(conversation_id: str, question: str, answer: str) -> None:
+    turns = int(chat_settings()["history_turns"])
     with conversations_lock:
         history = conversations.setdefault(conversation_id, [])
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
-        del history[:-MAX_HISTORY_MESSAGES]
+        keep = turns * 2
+        if keep <= 0:
+            history.clear()
+        else:
+            del history[:-keep]
+
+
+def ollama_json(path: str) -> dict | None:
+    """GET a small Ollama endpoint. None when Ollama is down."""
+    request = urllib.request.Request(ollama_url() + path)
+    try:
+        with _opener.open(request, timeout=3) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+
+
+def installed_models() -> list[str]:
+    payload = ollama_json("/api/tags")
+    if payload is None:
+        return []
+    return [item.get("name", "") for item in payload.get("models", []) if item.get("name")]
+
+
+def gpu_models() -> list[dict]:
+    """Models currently loaded. VRAM size comes from Ollama; no secrets."""
+    payload = ollama_json("/api/ps")
+    if payload is None:
+        return []
+    loaded = []
+    for item in payload.get("models", []):
+        vram = item.get("size_vram")
+        loaded.append(
+            {
+                "name": item.get("name", ""),
+                "vram_mb": round(vram / (1024 * 1024)) if isinstance(vram, (int, float)) else None,
+            }
+        )
+    return loaded
+
+
+def readonly_info() -> dict:
+    """Facts the panel shows and never edits. Passwords are not included."""
+    return {
+        "database_host": os.getenv("POSTGRES_HOST", "127.0.0.1"),
+        "database_port": os.getenv("POSTGRES_PORT", "5432"),
+        "mcp_tools": [
+            {"name": tool["function"]["name"], "description": tool["function"].get("description") or ""}
+            for tool in bridge.tools
+        ],
+        "gpu_models": gpu_models(),
+    }
+
+
+def read_body(handler: BaseHTTPRequestHandler) -> dict:
+    length = int(handler.headers.get("Content-Length", "0"))
+    return json.loads(handler.rfile.read(length).decode("utf-8"))
 
 
 class ChatHandler(BaseHTTPRequestHandler):
@@ -100,9 +170,28 @@ class ChatHandler(BaseHTTPRequestHandler):
         if self.path == "/api/health":
             self._send_json(200, self._health())
             return
+        if self.path == "/api/settings":
+            current = chat_settings()
+            self._send_json(
+                200,
+                {
+                    "values": {key: value for key, value in current.items() if key != "version"},
+                    "version": current["version"],
+                    "fields": field_specs(),
+                    "models": installed_models(),
+                    "readonly": readonly_info(),
+                },
+            )
+            return
         self._send_json(404, {"error": "That page does not exist."})
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/api/settings/preview":
+            self._preview()
+            return
+        if self.path == "/api/settings/apply":
+            self._apply()
+            return
         if self.path != "/api/chat":
             self._send_json(404, {"error": "That page does not exist."})
             return
@@ -152,6 +241,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "answer": result.answer,
                 "language": result.language,
                 "model": chat_model(),
+                "settings_version": chat_settings()["version"],
                 "elapsed_s": elapsed,
                 "tools": [
                     {
@@ -164,6 +254,73 @@ class ChatHandler(BaseHTTPRequestHandler):
                 ],
             },
         )
+
+    def _preview(self) -> None:
+        try:
+            body = read_body(self)
+        except (ValueError, UnicodeError, json.JSONDecodeError):
+            self._send_json(400, {"error": "The request was not valid JSON."})
+            return
+        models = installed_models()
+        if not models:
+            self._send_json(200, {"ok": False, "errors": [ollama_problem() or "Ollama returned no models."], "warnings": [], "changes": [], "needs_reindex": False, "check_vector_size": False})
+            return
+        result = review(chat_settings(), body.get("values", body), models)
+        result.pop("values", None)
+        self._send_json(200, result)
+
+    def _apply(self) -> None:
+        try:
+            body = read_body(self)
+        except (ValueError, UnicodeError, json.JSONDecodeError):
+            self._send_json(400, {"error": "The request was not valid JSON."})
+            return
+        models = installed_models()
+        if not models:
+            self._send_json(503, {"error": ollama_problem() or "Ollama returned no models."})
+            return
+        current = chat_settings()
+        result = review(current, body.get("values", body), models)
+        if not result["ok"]:
+            self._send_json(400, {"error": " ".join(result["errors"]), "errors": result["errors"]})
+            return
+        if not result["changes"]:
+            self._send_json(200, {"ok": True, "unchanged": True, "version": current["version"]})
+            return
+        blocked = reindex_confirmation_error(result["needs_reindex"], bool(body.get("confirm_reindex")))
+        if blocked:
+            self._send_json(400, {"error": blocked})
+            return
+        if not apply_lock.acquire(blocking=False):
+            self._send_json(409, {"error": "Another settings change is already running."})
+            return
+
+        self.protocol_version = "HTTP/1.0"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.end_headers()
+
+        def emit(event: dict) -> None:
+            self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
+            self.wfile.flush()
+
+        try:
+            values = result["values"]
+            if result["needs_reindex"]:
+                emit({"stage": "index", "message": "Re-indexing work instructions."})
+                outcome = index_documents(values, on_progress=emit)
+                if outcome.get("migrated"):
+                    emit({"stage": "migrate", "message": f"Vector column is now {outcome['dimensions']} numbers."})
+            saved = update_saved(values)
+            with conversations_lock:
+                conversations.clear()
+            emit({"stage": "mcp", "message": "Restarting the MCP server."})
+            bridge.restart()
+            emit({"stage": "done", "message": f"Settings version {saved['version']} is active. The chat was reset.", "version": saved["version"]})
+        except Exception as error:  # noqa: BLE001 - the panel shows the failure, the process stays up
+            emit({"stage": "error", "message": str(error)})
+        finally:
+            apply_lock.release()
 
     def _health(self) -> dict:
         return {

@@ -309,8 +309,8 @@ def search_instructions(
             ge=1,
             le=10,
             description=(
-                "How many chunks to return. Values below 6 are raised to 6, "
-                "the measured minimum that still includes the required procedure steps."
+                "Ignored for the search size. The admin setting decides how many chunks "
+                "are returned; this value is only reported as k_requested."
             ),
         ),
     ] = DEFAULT_K,
@@ -318,20 +318,24 @@ def search_instructions(
     """Search the plant's work instructions (procedures, limits, escalation rules) by meaning.
     Pass the user's full question; short keyword queries score lower.
     Returns the closest text chunks with their source file and similarity score.
-    k below 6 is raised to 6 on the server, so a smaller request cannot drop required steps.
+    The number of chunks is the admin setting, not this argument. k_requested is what the caller sent; k_used is what was searched.
     `relevant`/`found` are a similarity hint: use a chunk only if its text answers the
     question. If nothing does, say no relevant instruction was found; do not answer
     from general knowledge."""
+    from chat.settings import load_settings
+
     query = query.strip()
+    settings = load_settings()
     k_requested = k
-    k_used = max(k, DEFAULT_K)
+    k_used = int(settings["retrieval_k"])
+    threshold = float(settings["similarity_threshold"])
     log.info("search_instructions(%r, k_requested=%s, k_used=%s)", query, k_requested, k_used)
     if not query:
         raise ToolError("query is empty.")
 
     try:
         with read_only_db() as conn:
-            chunks = search_chunks(conn, query, k_used)
+            chunks = search_chunks(conn, query, k_used, min_similarity=threshold)
     except OllamaError as error:
         log.error("Ollama error: %s", error)
         raise ToolError("Ollama is not reachable, so instructions cannot be searched. Start Ollama and retry.") from error
@@ -346,7 +350,7 @@ def search_instructions(
         k_requested=k_requested,
         k_used=k_used,
         found=any(result.relevant for result in results),
-        min_similarity=MIN_RELEVANT_SIMILARITY,
+        min_similarity=threshold,
         results=results,
     )
 

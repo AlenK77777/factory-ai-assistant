@@ -10,5 +10,9 @@ __pycache__/
 # Loader output (regenerated on every run)
 data/rejected_rows.csv
 
+# Admin panel settings (not secrets; secrets stay in .env)
+data/chat_settings.json
+data/chat_settings.json.tmp
+
 # Excel lock files created while a workbook is open
 ~$*.xlsx

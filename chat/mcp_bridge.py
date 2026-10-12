@@ -75,6 +75,17 @@ class McpBridge:
                 self.error = f"The MCP server stopped responding ({error}). Restart the chat."
                 return {"result": self.error, "is_error": True}
 
+    def restart(self) -> None:
+        """Stop the MCP process and start it again, so it reloads settings."""
+        with self._lock:
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._restart(), self._loop)
+                future.result(timeout=30)
+            except Exception as error:  # noqa: BLE001
+                self.error = f"The MCP server did not restart. {error}"
+                self._session = None
+                raise RuntimeError(self.error) from error
+
     def close(self) -> None:
         if self._session is not None:
             future = asyncio.run_coroutine_threadsafe(self._close(), self._loop)
@@ -109,6 +120,10 @@ class McpBridge:
             return {"result": result.structured_content, "is_error": False}
         text = " ".join(getattr(block, "text", "") for block in getattr(result, "content", [])).strip()
         return {"result": text, "is_error": False}
+
+    async def _restart(self) -> None:
+        await self._close()
+        await self._open()
 
     async def _close(self) -> None:
         if self._session is not None:

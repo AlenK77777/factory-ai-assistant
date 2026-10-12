@@ -184,6 +184,15 @@ def text_to_embed(title: str, chunk: str) -> str:
     return chunk if chunk.startswith("# ") else f"{title}\n{chunk}"
 
 
+def chunk_document(text: str, settings: dict) -> list[str]:
+    """Split one instruction with the admin chunking settings."""
+    size = int(settings["chunk_size"])
+    overlap = int(settings["chunk_overlap"])
+    if settings["chunking_mode"] == "fixed":
+        return split_by_size(text, size, overlap)
+    return split_text(text, size, overlap)
+
+
 def connect() -> psycopg.Connection:
     """Connect as the owner role (POSTGRES_USER): indexing writes to the database."""
     try:
@@ -196,49 +205,86 @@ def connect() -> psycopg.Connection:
             connect_timeout=5,
         )
     except KeyError as error:
-        sys.exit(f"Missing setting {error} in .env (see .env.example).")
+        raise RuntimeError(f"Missing setting {error} in .env (see .env.example).") from error
     except psycopg.OperationalError as error:
-        sys.exit(f"Cannot connect to PostgreSQL.\n{error}\nIs the database running? Check: docker compose ps")
+        raise RuntimeError(
+            f"Cannot connect to PostgreSQL.\n{error}\nIs the database running? Check: docker compose ps"
+        ) from error
+
+
+def index_documents(settings: dict, on_progress=None) -> dict:
+    """Embed every instruction and replace doc_chunks in one transaction.
+
+    Embeddings are built first. If the new model uses a different vector size,
+    the column is changed in that same transaction, so a failure keeps the old index.
+    on_progress receives {"stage", "message", ...} and is optional.
+    """
+
+    def report(stage: str, message: str, **extra) -> None:
+        if on_progress is not None:
+            on_progress({"stage": stage, "message": message, **extra})
+
+    files = sorted(DOCS_DIR.glob("*.md"))
+    if not files:
+        raise RuntimeError(f"No .md files found in {DOCS_DIR}")
+
+    rows = []
+    dimensions = None
+    model = settings["embedding_model"]
+    for number, path in enumerate(files, start=1):
+        report("index", f"Embedding {path.name} ({number}/{len(files)})", done=number - 1, total=len(files))
+        text = path.read_text(encoding="utf-8")
+        title = document_title(text, fallback=path.stem)
+        chunks = chunk_document(text, settings)
+        if not chunks:
+            continue
+        vectors = embed_documents([text_to_embed(title, chunk) for chunk in chunks], model=model)
+        dimensions = len(vectors[0])
+        for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
+            if len(vector) != dimensions:
+                raise RuntimeError(f"{model} returned vectors of different lengths.")
+            rows.append((path.name, index, chunk, to_pgvector(vector)))
+
+    report("save", f"Saving {len(rows)} chunks")
+    migrated = False
+    try:
+        with connect() as conn:
+            current = conn.execute(
+                """
+                SELECT atttypmod FROM pg_attribute
+                WHERE attrelid = 'doc_chunks'::regclass AND attname = 'embedding'
+                """
+            ).fetchone()[0]
+            if dimensions is not None and int(current) != int(dimensions):
+                report("migrate", f"Changing the vector column from {current} to {dimensions} numbers, then re-indexing")
+                conn.execute("TRUNCATE doc_chunks")
+                conn.execute(f"ALTER TABLE doc_chunks ALTER COLUMN embedding TYPE vector({int(dimensions)})")
+                migrated = True
+            conn.execute("DELETE FROM doc_chunks")
+            with conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO doc_chunks (source, chunk_index, content, embedding) VALUES (%s, %s, %s, %s::vector)",
+                    rows,
+                )
+    except psycopg.errors.UndefinedTable as error:
+        raise RuntimeError(
+            "Table doc_chunks does not exist. Create it with:\n"
+            "  docker compose exec db psql -U factory -d factory "
+            "-f /docker-entrypoint-initdb.d/03_doc_chunks.sql"
+        ) from error
+    report("save", f"Stored {len(rows)} chunks from {len(files)} files", chunks=len(rows))
+    return {"chunks": len(rows), "files": len(files), "dimensions": dimensions, "migrated": migrated}
 
 
 def main() -> None:
     load_dotenv(ROOT / ".env")
-    files = sorted(DOCS_DIR.glob("*.md"))
-    if not files:
-        sys.exit(f"No .md files found in {DOCS_DIR}")
+    from chat.settings import load_settings
 
-    rows = []
-    print(f"Embedding chunks with Ollama ({len(files)} files)")
-    for path in files:
-        text = path.read_text(encoding="utf-8")
-        title = document_title(text, fallback=path.stem)
-        chunks = split_text(text)
-        try:
-            vectors = embed_documents([text_to_embed(title, chunk) for chunk in chunks])
-        except OllamaError as error:
-            sys.exit(f"{error}\nNothing was changed in the database.")
-
-        for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
-            rows.append((path.name, index, chunk, to_pgvector(vector)))
-        print(f"  {path.name}: {len(chunks)} chunks")
-
-    # The "with" block commits at the end, or rolls back (keeping the old chunks) on an error.
     try:
-        with connect() as conn:
-            conn.execute("DELETE FROM doc_chunks")
-            with conn.cursor() as cur:
-                cur.executemany(
-                    "INSERT INTO doc_chunks (source, chunk_index, content, embedding) "
-                    "VALUES (%s, %s, %s, %s::vector)",
-                    rows,
-                )
-    except psycopg.errors.UndefinedTable:
-        sys.exit(
-            "Table doc_chunks does not exist. Create it with:\n"
-            "  docker compose exec db psql -U factory -d factory -f /docker-entrypoint-initdb.d/03_doc_chunks.sql"
-        )
-
-    print(f"Stored {len(rows)} chunks from {len(files)} files in doc_chunks (old chunks replaced).")
+        result = index_documents(load_settings(), on_progress=lambda event: print(event["message"]))
+    except (OllamaError, RuntimeError) as error:
+        sys.exit(f"{error}\nNothing was changed in the database." if "Nothing was changed" not in str(error) else str(error))
+    print(f"Stored {result['chunks']} chunks from {result['files']} files in doc_chunks (old chunks replaced).")
 
 
 if __name__ == "__main__":

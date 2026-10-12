@@ -40,17 +40,20 @@ def test_k_of_3_still_returns_at_least_the_measured_minimum(monkeypatch):
         def cursor(self, **kwargs):
             return Cursor()
 
-    chunks = search_chunks(Connection(), "What should I do if delamination is found?", k=3)
+    chunks = search_chunks(Connection(), "What should I do if delamination is found?", k=3, min_similarity=0.48)
 
-    assert captured["k"] >= DEFAULT_K
-    assert len(chunks) >= DEFAULT_K
-    assert chunks[1]["chunk_index"] == 1
+    assert captured["k"] == 3
+    assert len(chunks) == 3
 
     @contextmanager
     def fake_db():
         yield Connection()
 
     monkeypatch.setattr("mcp_server.server.read_only_db", fake_db)
+    monkeypatch.setattr(
+        "chat.settings.load_settings",
+        lambda: {"retrieval_k": DEFAULT_K, "similarity_threshold": 0.48},
+    )
     result = search_instructions("What should I do if delamination is found?", k=3)
     assert result.k_requested == 3
     assert result.k_used == DEFAULT_K

@@ -36,16 +36,18 @@ SEARCH_SQL = """
 """
 
 
-def search_chunks(conn, query: str, k: int = DEFAULT_K) -> list[dict]:
+def search_chunks(conn, query: str, k: int = DEFAULT_K, min_similarity: float | None = None) -> list[dict]:
     """Return the k closest chunks, closest first.
 
-    Each chunk is a dict with source, chunk_index, content, distance (cosine,
-    pgvector <=>), similarity (1 - distance) and relevant (similarity above the
-    threshold). A request for fewer than DEFAULT_K chunks is raised to DEFAULT_K:
-    that is the measured minimum that still retrieves the required procedure steps.
-    Raises OllamaError if the question cannot be embedded.
+    k is used as given. search_instructions decides that number from the admin
+    setting, so the chat model cannot lower it. min_similarity marks the hint
+    flag on each chunk. Raises OllamaError if the question cannot be embedded.
     """
-    k = max(k, DEFAULT_K)
+    if min_similarity is None:
+        from chat.settings import load_settings
+
+        min_similarity = float(load_settings()["similarity_threshold"])
+    k = int(k)
     query_vector = to_pgvector(embed_query(query))
     with conn.cursor(row_factory=dict_row) as cur:
         rows = cur.execute(SEARCH_SQL, {"query": query_vector, "k": k}).fetchall()
@@ -60,7 +62,7 @@ def search_chunks(conn, query: str, k: int = DEFAULT_K) -> list[dict]:
                 "content": row["content"],
                 "distance": round(row["distance"], 3),
                 "similarity": round(similarity, 3),
-                "relevant": similarity >= MIN_RELEVANT_SIMILARITY,
+                "relevant": similarity >= min_similarity,
             }
         )
     return chunks
