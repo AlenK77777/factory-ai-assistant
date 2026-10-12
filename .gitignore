@@ -1,0 +1,14 @@
+# Python
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+
+# Secrets
+.env
+
+# Loader output (regenerated on every run)
+data/rejected_rows.csv
+
+# Excel lock files created while a workbook is open
+~$*.xlsx
