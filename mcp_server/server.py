@@ -17,6 +17,7 @@ search_instructions needs Ollama running locally (query embeddings).
 import logging
 import os
 import sys
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -31,11 +32,12 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
-# Lets this script import project modules such as rag.embeddings.
+# Lets this script import project modules such as rag.retrieval.
 sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
-from rag.embeddings import OllamaError, embed_query, to_pgvector  # noqa: E402
+from rag.embeddings import OllamaError  # noqa: E402
+from rag.retrieval import MIN_RELEVANT_SIMILARITY, search_chunks  # noqa: E402
 
 logging.basicConfig(
     stream=sys.stderr,
@@ -54,12 +56,6 @@ GROUP_COLUMNS = {
 }
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
-
-# Measured with nomic-embed-text on docs/instructions (best chunk per question):
-# on-topic questions 0.64-0.84, clearly unrelated ones 0.44-0.59, but other
-# workplace questions (parking, IT) reach 0.63-0.68. So "relevant" is a hint,
-# not proof; the assistant must still check that the text answers the question.
-MIN_RELEVANT_SIMILARITY = 0.65
 
 server = MCPServer(
     "factory-db",
@@ -162,18 +158,25 @@ def db_settings() -> dict:
     }
 
 
-def fetch_all(query, params=()) -> list[dict]:
-    """Run one parameterised SELECT in a read-only session and return the rows as dicts."""
+@contextmanager
+def read_only_db():
+    """A read-only database session; connection problems become a clean ToolError."""
     try:
         with psycopg.connect(**db_settings(), row_factory=dict_row) as conn:
             conn.read_only = True
-            return conn.execute(query, params).fetchall()
+            yield conn
     except psycopg.OperationalError as error:
         log.error("Database error: %s", error)
         raise ToolError(
             "The database is not reachable right now. Check that the db container is running "
             "(docker compose ps)."
         ) from error
+
+
+def fetch_all(query, params=()) -> list[dict]:
+    """Run one parameterised SELECT in a read-only session and return the rows as dicts."""
+    with read_only_db() as conn:
+        return conn.execute(query, params).fetchall()
 
 
 # ---------------------------------------------------------------------------
@@ -291,39 +294,17 @@ def search_instructions(
         raise ToolError("query is empty.")
 
     try:
-        query_vector = to_pgvector(embed_query(query))
+        with read_only_db() as conn:
+            chunks = search_chunks(conn, query, k)
     except OllamaError as error:
         log.error("Ollama error: %s", error)
         raise ToolError("Ollama is not reachable, so instructions cannot be searched. Start Ollama and retry.") from error
-
-    try:
-        rows = fetch_all(
-            """
-            SELECT source, chunk_index, content, embedding <=> %(query)s::vector AS distance
-            FROM doc_chunks
-            ORDER BY distance
-            LIMIT %(k)s
-            """,
-            {"query": query_vector, "k": k},
-        )
     except psycopg.errors.UndefinedTable as error:
         raise ToolError("The doc_chunks table does not exist yet (see db/init/03_doc_chunks.sql).") from error
-    if not rows:
+    if not chunks:
         raise ToolError("No work instructions are indexed yet. Run: python rag/index_docs.py")
 
-    results = []
-    for row in rows:
-        similarity = 1 - row["distance"]
-        results.append(
-            InstructionChunk(
-                source=row["source"],
-                chunk_index=row["chunk_index"],
-                content=row["content"],
-                distance=round(row["distance"], 3),
-                similarity=round(similarity, 3),
-                relevant=similarity >= MIN_RELEVANT_SIMILARITY,
-            )
-        )
+    results = [InstructionChunk(**chunk) for chunk in chunks]
     return InstructionSearch(
         query=query,
         found=any(result.relevant for result in results),
