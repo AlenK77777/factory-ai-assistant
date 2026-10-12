@@ -37,7 +37,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
 from rag.embeddings import OllamaError  # noqa: E402
-from rag.retrieval import MIN_RELEVANT_SIMILARITY, search_chunks  # noqa: E402
+from rag.retrieval import DEFAULT_K, MIN_RELEVANT_SIMILARITY, search_chunks  # noqa: E402
 
 logging.basicConfig(
     stream=sys.stderr,
@@ -280,7 +280,7 @@ def defect_summary(
 @server.tool(annotations=READ_ONLY)
 def search_instructions(
     query: str,
-    k: Annotated[int, Field(ge=1, le=10, description="Number of chunks to return")] = 4,
+    k: Annotated[int, Field(ge=1, le=10, description="Number of chunks to return")] = DEFAULT_K,
 ) -> InstructionSearch:
     """Search the plant's work instructions (procedures, limits, escalation rules) by meaning.
     Pass the user's full question; short keyword queries score lower.

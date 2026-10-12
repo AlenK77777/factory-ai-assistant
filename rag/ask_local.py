@@ -49,8 +49,9 @@ from rag.language import (  # noqa: E402
     Language,
     answer_in_language,
     detect_language,
+    unused_sources,
 )
-from rag.retrieval import search_chunks  # noqa: E402
+from rag.retrieval import DEFAULT_K, search_chunks  # noqa: E402
 
 MAX_ATTEMPTS = 2  # the first try plus one retry
 
@@ -67,7 +68,7 @@ If the excerpts answer the question:
 - set "found" to true;
 - give a short, practical answer (numbered steps if it is a procedure);
 - write "answer" in the language named in the JSON schema's "language" field (translate the facts from the excerpts; do not add any);
-- keep file names in "sources" exactly as written after "source:".
+- list in "sources" only the file names of excerpts you actually used, exactly as written after "source:". Do not list a file you did not use.
 
 If the excerpts do not answer the question:
 - set "found" to false and "sources" to [];
@@ -126,7 +127,7 @@ def build_messages(question: str, chunks: list[dict], language: Language) -> lis
     ]
 
 
-def parse_answer(content: str, allowed_sources: set[str], language: Language) -> BaseModel:
+def parse_answer(content: str, chunks: list[dict], language: Language) -> BaseModel:
     """Validate the model's reply. Raises ValueError (pydantic's ValidationError is one) with the reason.
 
     When found is false the answer is replaced by the fixed NOT_FOUND text in the
@@ -135,6 +136,7 @@ def parse_answer(content: str, allowed_sources: set[str], language: Language) ->
     model = answer_model_for(language)
     answer = model.model_validate_json(content)
     sources = list(dict.fromkeys(source.strip() for source in answer.sources))
+    allowed_sources = {chunk["source"] for chunk in chunks}
 
     unknown = [source for source in sources if source not in allowed_sources]
     if unknown:
@@ -143,10 +145,16 @@ def parse_answer(content: str, allowed_sources: set[str], language: Language) ->
         raise ValueError('"found" is true but "sources" is empty')
     if not answer.found and sources:
         raise ValueError('"found" is false but "sources" is not empty')
+    unused = unused_sources(answer.answer, sources, chunks)
+    if unused:
+        raise ValueError(
+            f"sources {unused} are listed but the answer does not use them "
+            f"(no shared plant code or number such as HOLD, Q2, 30)"
+        )
     if answer.found and not answer_in_language(answer.answer, language):
         raise ValueError(
             f'"answer" must be written in {LANGUAGE_NAMES[language]} '
-            f'(language="{language}"); translate the facts, keep plant codes such as ESD as they are'
+            f'(language="{language}"); do not mix in letters from another script'
         )
 
     if not answer.found:
@@ -179,7 +187,6 @@ def ask_model(question: str, chunks: list[dict], think: bool) -> tuple[BaseModel
     language = detect_language(question)
     schema = answer_model_for(language).model_json_schema()
     messages = build_messages(question, chunks, language)
-    allowed_sources = {chunk["source"] for chunk in chunks}
     responses = []
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -187,7 +194,7 @@ def ask_model(question: str, chunks: list[dict], think: bool) -> tuple[BaseModel
         responses.append(response)
         content = response["message"]["content"]
         try:
-            return parse_answer(content, allowed_sources, language), responses, language
+            return parse_answer(content, chunks, language), responses, language
         except ValueError as error:
             reason = str(error)[:300]
             info(f"Attempt {attempt}: invalid reply ({reason})")
@@ -244,8 +251,8 @@ def print_timing(retrieval_s: float, total_s: float, responses: list[dict], thin
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Answer a question from the work instructions with the local model.")
     parser.add_argument("question", nargs="+", help="the question (quotes are optional)")
-    parser.add_argument("-k", type=int, default=4, choices=range(1, 11), metavar="1-10",
-                        help="number of chunks to retrieve (default 4)")
+    parser.add_argument("-k", type=int, default=DEFAULT_K, choices=range(1, 11), metavar="1-10",
+                        help=f"number of chunks to retrieve (default {DEFAULT_K})")
     parser.add_argument("--think", action="store_true", help="let qwen3 think before answering (slower)")
     return parser.parse_args()
 

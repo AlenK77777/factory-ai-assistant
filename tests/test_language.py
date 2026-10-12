@@ -54,3 +54,20 @@ def test_not_found_texts_are_in_their_own_language():
     assert answer_in_language(NOT_FOUND["en"], "en")
     assert answer_in_language(NOT_FOUND["ru"], "ru")
     assert answer_in_language(NOT_FOUND["he"], "he")
+
+
+def test_cyrillic_inside_a_hebrew_word_is_rejected():
+    # The mixed letter is Cyrillic о (U+043E), not Hebrew.
+    assert not answer_in_language("האיזоляציה Q2", "he")
+
+
+def test_hebrew_inside_a_russian_word_is_rejected():
+    assert not answer_in_language("изоляцיה HOLD", "ru")
+
+
+def test_cyrillic_in_an_english_answer_is_rejected():
+    assert not answer_in_language("Move the lot to изоляция rack Q2.", "en")
+
+
+def test_arabic_letters_in_a_hebrew_answer_are_rejected():
+    assert not answer_in_language("יש לבדוש على both הרגליים HOLD", "he")

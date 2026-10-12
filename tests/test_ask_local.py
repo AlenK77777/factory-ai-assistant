@@ -8,10 +8,10 @@ from rag import ask_local
 from rag.ask_local import answer_model_for, ask_model, build_messages, parse_answer
 from rag.language import NOT_FOUND
 
-SOURCES = {"delamination-containment.md", "esd-rules.md"}
 CHUNKS = [
-    {"source": "delamination-containment.md", "chunk_index": 1, "content": "Stop processing the lot."},
-    {"source": "esd-rules.md", "chunk_index": 2, "content": "Test your wrist strap every shift."},
+    {"source": "delamination-containment.md", "chunk_index": 1, "content": "Stop processing the lot. Attach a red HOLD tag and move to rack Q2 within 30 minutes."},
+    {"source": "esd-rules.md", "chunk_index": 2, "content": "Test your wrist strap every shift at the EPA entrance."},
+    {"source": "plating-void-investigation.md", "chunk_index": 0, "content": "Average hole copper thickness must be at least 25 µm."},
 ]
 
 
@@ -40,14 +40,18 @@ def test_schema_pins_language_and_requires_the_four_fields():
 
 
 def test_valid_english_reply_passes():
-    parsed = parse_answer(reply(), SOURCES, "en")
+    parsed = parse_answer(reply(answer="Attach a HOLD tag and move the lot to Q2 within 30 minutes."), CHUNKS, "en")
     assert parsed.found is True
     assert parsed.language == "en"
     assert parsed.sources == ["delamination-containment.md"]
 
 
 def test_duplicate_sources_are_removed():
-    parsed = parse_answer(reply(sources=["esd-rules.md", "esd-rules.md "]), SOURCES, "en")
+    parsed = parse_answer(
+        reply(answer="Test the wrist strap at the EPA entrance every shift.", sources=["esd-rules.md", "esd-rules.md "]),
+        CHUNKS,
+        "en",
+    )
     assert parsed.sources == ["esd-rules.md"]
 
 
@@ -65,39 +69,39 @@ def test_duplicate_sources_are_removed():
 )
 def test_invalid_reply_is_rejected(content):
     with pytest.raises(ValueError):
-        parse_answer(content, SOURCES, "en")
+        parse_answer(content, CHUNKS, "en")
 
 
 def test_wrong_language_code_is_rejected():
     with pytest.raises(ValueError):
-        parse_answer(reply(language="en"), SOURCES, "ru")
+        parse_answer(reply(language="en"), CHUNKS, "ru")
 
 
 def test_english_answer_for_a_russian_question_is_rejected():
     with pytest.raises(ValueError, match="Russian"):
-        parse_answer(reply(language="ru", answer="Stop the lot."), SOURCES, "ru")
+        parse_answer(reply(language="ru", answer="Stop the lot."), CHUNKS, "ru")
 
 
 def test_source_that_was_not_retrieved_is_rejected():
     with pytest.raises(ValueError, match="not excerpt file names"):
-        parse_answer(reply(sources=["general-knowledge.md"]), SOURCES, "en")
+        parse_answer(reply(sources=["general-knowledge.md"]), CHUNKS, "en")
 
 
 def test_found_without_sources_is_rejected():
     with pytest.raises(ValueError, match="sources\" is empty"):
-        parse_answer(reply(sources=[]), SOURCES, "en")
+        parse_answer(reply(sources=[]), CHUNKS, "en")
 
 
 def test_not_found_with_sources_is_rejected():
     with pytest.raises(ValueError, match="not empty"):
-        parse_answer(reply(found=False), SOURCES, "en")
+        parse_answer(reply(found=False), CHUNKS, "en")
 
 
 @pytest.mark.parametrize("language", ["en", "ru", "he"])
 def test_not_found_answer_is_replaced_by_the_fixed_text(language):
     parsed = parse_answer(
         reply(language=language, answer="Paris is the capital of France.", sources=[], found=False),
-        SOURCES,
+        CHUNKS,
         language,
     )
     assert parsed.answer == NOT_FOUND[language]
@@ -115,7 +119,12 @@ def test_messages_contain_question_source_names_and_language():
 
 
 def test_invalid_reply_is_retried_once_with_feedback(monkeypatch):
-    replies = iter([fake_response("{broken"), fake_response(reply())])
+    replies = iter(
+        [
+            fake_response("{broken"),
+            fake_response(reply(answer="Attach a HOLD tag and move the lot to Q2 within 30 minutes.")),
+        ]
+    )
     sent = []
 
     def fake_call_model(messages, think, schema):
@@ -149,3 +158,24 @@ def test_gives_up_after_the_retry(monkeypatch):
     assert parsed is None
     assert language == "ru"
     assert len(calls) == 2
+
+
+def test_translated_answer_without_latin_codes_is_still_accepted():
+    parsed = parse_answer(
+        reply(language="he", answer="עצרו את המנה והצמידו תווית אדומה לכל לוח.", sources=["delamination-containment.md"]),
+        CHUNKS,
+        "he",
+    )
+    assert parsed.found is True
+
+
+def test_cited_source_that_was_not_used_is_rejected():
+    with pytest.raises(ValueError, match="not use them"):
+        parse_answer(
+            reply(
+                answer="Attach a HOLD tag and move the lot to Q2 within 30 minutes.",
+                sources=["delamination-containment.md", "plating-void-investigation.md"],
+            ),
+            CHUNKS,
+            "en",
+        )

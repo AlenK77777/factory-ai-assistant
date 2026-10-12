@@ -19,6 +19,13 @@ from rag.embeddings import embed_query, to_pgvector
 # the question.
 MIN_RELEVANT_SIMILARITY = 0.48
 
+# Measured recall@k on 12 EN/RU/HE questions (file-level / required-chunk):
+#   k=4: mean file 0.97, required-chunk 0.83  (English delamination chunk #1 is rank 5)
+#   k=6: mean file 0.97, required-chunk 1.00
+#   k=8: mean file 1.00, required-chunk 1.00  (adds off-topic files; unused-source risk)
+# k=6 is the smallest value that always retrieves the required procedure chunks.
+DEFAULT_K = 6
+
 SEARCH_SQL = """
     SELECT source, chunk_index, content, embedding <=> %(query)s::vector AS distance
     FROM doc_chunks
@@ -27,7 +34,7 @@ SEARCH_SQL = """
 """
 
 
-def search_chunks(conn, query: str, k: int = 4) -> list[dict]:
+def search_chunks(conn, query: str, k: int = DEFAULT_K) -> list[dict]:
     """Return the k closest chunks, closest first.
 
     Each chunk is a dict with source, chunk_index, content, distance (cosine,
