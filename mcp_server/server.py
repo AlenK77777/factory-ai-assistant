@@ -8,8 +8,10 @@ Tools:
     get_order_status(order_id)                 one order + its defect count
     list_late_orders(as_of_date=None)          orders past due_date and not Shipped
     defect_summary(days=30, group_by=...)      defect counts and share of total
+    search_instructions(query, k=4)            work-instruction chunks closest in meaning
 
 Built with the official MCP Python SDK (v2, where FastMCP is called MCPServer).
+search_instructions needs Ollama running locally (query embeddings).
 """
 
 import logging
@@ -29,7 +31,11 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
+# Lets this script import project modules such as rag.embeddings.
+sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
+
+from rag.embeddings import OllamaError, embed_query, to_pgvector  # noqa: E402
 
 logging.basicConfig(
     stream=sys.stderr,
@@ -49,12 +55,21 @@ GROUP_COLUMNS = {
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 
+# Measured with nomic-embed-text on docs/instructions (best chunk per question):
+# on-topic questions 0.64-0.84, clearly unrelated ones 0.44-0.59, but other
+# workplace questions (parking, IT) reach 0.63-0.68. So "relevant" is a hint,
+# not proof; the assistant must still check that the text answers the question.
+MIN_RELEVANT_SIMILARITY = 0.65
+
 server = MCPServer(
     "factory-db",
     instructions=(
-        "Read-only access to SYNTHETIC production orders and defects of a PCB plant. "
+        "Read-only access to SYNTHETIC production orders, defects and work instructions of a PCB plant. "
         "Answer only from tool results. If a tool returns nothing or an error, say so; "
-        "do not guess numbers."
+        "do not guess numbers. For procedures use search_instructions with the user's full question. "
+        "Answer only from returned text that really answers the question, and name the instruction file. "
+        "If found=false, or no returned text answers the question, say that no relevant work instruction "
+        "was found; never fill the gap from general knowledge."
     ),
 )
 
@@ -110,6 +125,22 @@ class DefectSummary(BaseModel):
     total_defects: int
     total_units: int
     groups: list[DefectGroup] = Field(description="Largest group first")
+
+
+class InstructionChunk(BaseModel):
+    source: str = Field(description="Instruction file name in docs/instructions")
+    chunk_index: int = Field(description="Position of the chunk in the file, from 0")
+    content: str
+    distance: float = Field(description="Cosine distance to the query (0 = same meaning)")
+    similarity: float = Field(description="1 - distance; higher means closer in meaning")
+    relevant: bool = Field(description=f"similarity >= {MIN_RELEVANT_SIMILARITY} (a hint, not proof)")
+
+
+class InstructionSearch(BaseModel):
+    query: str
+    found: bool = Field(description="True if at least one chunk is above the similarity threshold")
+    min_similarity: float = Field(description="Threshold used for 'relevant'")
+    results: list[InstructionChunk] = Field(description="Closest first")
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +271,64 @@ def defect_summary(
         total_defects=total_defects,
         total_units=sum(group.defective_units for group in groups),
         groups=groups,
+    )
+
+
+@server.tool(annotations=READ_ONLY)
+def search_instructions(
+    query: str,
+    k: Annotated[int, Field(ge=1, le=10, description="Number of chunks to return")] = 4,
+) -> InstructionSearch:
+    """Search the plant's work instructions (procedures, limits, escalation rules) by meaning.
+    Pass the user's full question; short keyword queries score lower.
+    Returns the k closest text chunks with their source file and similarity score.
+    `relevant`/`found` are a similarity hint: use a chunk only if its text answers the
+    question. If nothing does, say no relevant instruction was found; do not answer
+    from general knowledge."""
+    query = query.strip()
+    log.info("search_instructions(%r, k=%s)", query, k)
+    if not query:
+        raise ToolError("query is empty.")
+
+    try:
+        query_vector = to_pgvector(embed_query(query))
+    except OllamaError as error:
+        log.error("Ollama error: %s", error)
+        raise ToolError("Ollama is not reachable, so instructions cannot be searched. Start Ollama and retry.") from error
+
+    try:
+        rows = fetch_all(
+            """
+            SELECT source, chunk_index, content, embedding <=> %(query)s::vector AS distance
+            FROM doc_chunks
+            ORDER BY distance
+            LIMIT %(k)s
+            """,
+            {"query": query_vector, "k": k},
+        )
+    except psycopg.errors.UndefinedTable as error:
+        raise ToolError("The doc_chunks table does not exist yet (see db/init/03_doc_chunks.sql).") from error
+    if not rows:
+        raise ToolError("No work instructions are indexed yet. Run: python rag/index_docs.py")
+
+    results = []
+    for row in rows:
+        similarity = 1 - row["distance"]
+        results.append(
+            InstructionChunk(
+                source=row["source"],
+                chunk_index=row["chunk_index"],
+                content=row["content"],
+                distance=round(row["distance"], 3),
+                similarity=round(similarity, 3),
+                relevant=similarity >= MIN_RELEVANT_SIMILARITY,
+            )
+        )
+    return InstructionSearch(
+        query=query,
+        found=any(result.relevant for result in results),
+        min_similarity=MIN_RELEVANT_SIMILARITY,
+        results=results,
     )
 
 
