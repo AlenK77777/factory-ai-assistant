@@ -75,6 +75,12 @@ server = MCPServer(
 # ---------------------------------------------------------------------------
 
 
+class DefectTypeTotal(BaseModel):
+    defect_type: str
+    count: int = Field(description="Number of defect records of this type")
+    units: int = Field(description="Sum of the quantities of those records")
+
+
 class OrderStatus(BaseModel):
     order_id: str
     customer_sector: str
@@ -88,6 +94,7 @@ class OrderStatus(BaseModel):
     is_late: bool = Field(description="due_date is before today and the order is not Shipped")
     defect_count: int = Field(description="Number of defect records logged for this order")
     defective_units: int = Field(description="Sum of the quantities of those defect records")
+    defect_types: list[DefectTypeTotal] = Field(description="Those defects grouped by type, largest first")
 
 
 class LateOrder(BaseModel):
@@ -134,6 +141,8 @@ class InstructionChunk(BaseModel):
 
 class InstructionSearch(BaseModel):
     query: str
+    k_requested: int = Field(description="k the caller asked for")
+    k_used: int = Field(description="k actually searched; never below the measured minimum of 6")
     found: bool = Field(description="True if at least one chunk is above the similarity threshold")
     min_similarity: float = Field(description="Threshold used for 'relevant'")
     results: list[InstructionChunk] = Field(description="Closest first")
@@ -187,7 +196,7 @@ def fetch_all(query, params=()) -> list[dict]:
 @server.tool(annotations=READ_ONLY)
 def get_order_status(order_id: str) -> OrderStatus:
     """Get one production order by id (for example PO-10001): its status, dates,
-    production line, whether it is late, and how many defects were logged for it."""
+    production line, whether it is late, and the defect types logged for it."""
     order_id = order_id.strip().upper()
     log.info("get_order_status(%s)", order_id)
     if not order_id:
@@ -211,7 +220,21 @@ def get_order_status(order_id: str) -> OrderStatus:
 
     order = rows[0]
     is_late = order["due_date"] < date.today() and order["status"] != "Shipped"
-    return OrderStatus(**order, is_late=is_late)
+    type_rows = fetch_all(
+        """
+        SELECT defect_type, COUNT(*) AS count, COALESCE(SUM(quantity), 0) AS units
+        FROM defects
+        WHERE order_id = %s
+        GROUP BY defect_type
+        ORDER BY count DESC, defect_type
+        """,
+        (order_id,),
+    )
+    return OrderStatus(
+        **order,
+        is_late=is_late,
+        defect_types=[DefectTypeTotal(**row) for row in type_rows],
+    )
 
 
 @server.tool(annotations=READ_ONLY)
@@ -280,22 +303,35 @@ def defect_summary(
 @server.tool(annotations=READ_ONLY)
 def search_instructions(
     query: str,
-    k: Annotated[int, Field(ge=1, le=10, description="Number of chunks to return")] = DEFAULT_K,
+    k: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=10,
+            description=(
+                "How many chunks to return. Values below 6 are raised to 6, "
+                "the measured minimum that still includes the required procedure steps."
+            ),
+        ),
+    ] = DEFAULT_K,
 ) -> InstructionSearch:
     """Search the plant's work instructions (procedures, limits, escalation rules) by meaning.
     Pass the user's full question; short keyword queries score lower.
-    Returns the k closest text chunks with their source file and similarity score.
+    Returns the closest text chunks with their source file and similarity score.
+    k below 6 is raised to 6 on the server, so a smaller request cannot drop required steps.
     `relevant`/`found` are a similarity hint: use a chunk only if its text answers the
     question. If nothing does, say no relevant instruction was found; do not answer
     from general knowledge."""
     query = query.strip()
-    log.info("search_instructions(%r, k=%s)", query, k)
+    k_requested = k
+    k_used = max(k, DEFAULT_K)
+    log.info("search_instructions(%r, k_requested=%s, k_used=%s)", query, k_requested, k_used)
     if not query:
         raise ToolError("query is empty.")
 
     try:
         with read_only_db() as conn:
-            chunks = search_chunks(conn, query, k)
+            chunks = search_chunks(conn, query, k_used)
     except OllamaError as error:
         log.error("Ollama error: %s", error)
         raise ToolError("Ollama is not reachable, so instructions cannot be searched. Start Ollama and retry.") from error
@@ -307,6 +343,8 @@ def search_instructions(
     results = [InstructionChunk(**chunk) for chunk in chunks]
     return InstructionSearch(
         query=query,
+        k_requested=k_requested,
+        k_used=k_used,
         found=any(result.relevant for result in results),
         min_similarity=MIN_RELEVANT_SIMILARITY,
         results=results,

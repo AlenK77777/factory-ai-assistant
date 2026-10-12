@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Factory assistant</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.45 "Segoe UI", sans-serif;
+      background: #eef1f4;
+      color: #1c2430;
+    }
+    main { max-width: 740px; margin: 0 auto; padding: 24px 16px 120px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .note { color: #5c6b7a; margin: 0 0 16px; }
+    #banner {
+      display: none;
+      background: #fde8e6;
+      border: 1px solid #e3b2ac;
+      color: #6d2018;
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-bottom: 16px;
+    }
+    article { margin: 0 0 12px; }
+    article.user { display: flex; justify-content: flex-end; }
+    .text {
+      white-space: pre-wrap;
+      padding: 10px 12px;
+      border-radius: 10px;
+      max-width: 90%;
+    }
+    article.user .text { background: #d9e7f7; }
+    article.assistant .text { background: #fff; border: 1px solid #d5dbe3; }
+    details { margin: 6px 0 0; font-size: 13px; color: #3d4b5c; }
+    summary { cursor: pointer; }
+    pre {
+      white-space: pre-wrap;
+      background: #fff;
+      border: 1px solid #d5dbe3;
+      border-radius: 8px;
+      padding: 10px;
+      overflow: auto;
+    }
+    form {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      background: #eef1f4;
+      border-top: 1px solid #d5dbe3;
+      padding: 12px 16px;
+    }
+    .row { max-width: 740px; margin: 0 auto; display: flex; gap: 8px; }
+    textarea {
+      flex: 1;
+      resize: vertical;
+      min-height: 48px;
+      max-height: 140px;
+      font: inherit;
+      padding: 8px;
+      border: 1px solid #b7c0cb;
+      border-radius: 8px;
+    }
+    button {
+      font: inherit;
+      background: #1f4e79;
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      padding: 0 16px;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: default; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Factory assistant</h1>
+    <p class="note">Ask about an order, defects, or a work instruction. English, Russian or Hebrew. Synthetic data.</p>
+    <div id="banner"></div>
+    <div id="log"></div>
+  </main>
+  <form id="form">
+    <div class="row">
+      <textarea id="question" dir="auto" placeholder="Type a question" aria-label="Question" required></textarea>
+      <button type="submit" id="send">Send</button>
+    </div>
+  </form>
+  <script>
+    const log = document.getElementById("log");
+    const banner = document.getElementById("banner");
+    const form = document.getElementById("form");
+    const question = document.getElementById("question");
+    const send = document.getElementById("send");
+    const conversationId = localStorage.getItem("factory-chat-id") || crypto.randomUUID();
+    localStorage.setItem("factory-chat-id", conversationId);
+
+    function showBanner(text) {
+      banner.style.display = "block";
+      banner.textContent = text;
+    }
+
+    function addMessage(role, text, meta) {
+      const article = document.createElement("article");
+      article.className = role;
+      const body = document.createElement("div");
+      body.className = "text";
+      body.dir = "auto";
+      body.textContent = text;
+      article.appendChild(body);
+      if (meta) {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = "How I got this";
+        const pre = document.createElement("pre");
+        pre.dir = "auto";
+        pre.textContent = formatTrace(meta);
+        details.appendChild(summary);
+        details.appendChild(pre);
+        article.appendChild(details);
+      }
+      log.appendChild(article);
+      article.scrollIntoView({ block: "nearest" });
+    }
+
+    function formatTrace(meta) {
+      const lines = ["Model: " + meta.model, "Time: " + meta.elapsed_s + " s"];
+      if (!meta.tools.length) lines.push("No tools were called.");
+      for (const tool of meta.tools) {
+        lines.push("");
+        lines.push("Tool: " + tool.name + (tool.is_error ? " (error)" : ""));
+        lines.push("Arguments: " + JSON.stringify(tool.arguments, null, 2));
+        if (tool.result && tool.result.k_used != null) {
+          lines.push("k requested: " + tool.result.k_requested + ", k used: " + tool.result.k_used);
+        }
+        lines.push("Result: " + JSON.stringify(tool.result, null, 2));
+        const rows = tool.result && tool.result.results;
+        if (Array.isArray(rows)) {
+          lines.push("Sources:");
+          for (const row of rows) {
+            lines.push("  " + row.source + "  similarity " + row.similarity);
+          }
+        }
+      }
+      return lines.join("\n");
+    }
+
+    async function checkHealth() {
+      try {
+        const health = await (await fetch("/api/health")).json();
+        if (health.ollama) showBanner(health.ollama);
+        else if (health.mcp) showBanner(health.mcp);
+      } catch (error) {
+        showBanner("The chat server did not respond.");
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const text = question.value.trim();
+      if (!text) return;
+      addMessage("user", text);
+      question.value = "";
+      send.disabled = true;
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversation_id: conversationId, message: text }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          addMessage("assistant", data.error || "The request failed.");
+          return;
+        }
+        addMessage("assistant", data.answer, data);
+      } catch (error) {
+        addMessage("assistant", "The chat server did not respond. Is it still running?");
+      } finally {
+        send.disabled = false;
+        question.focus();
+      }
+    });
+
+    question.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    checkHealth();
+  </script>
+</body>
+</html>

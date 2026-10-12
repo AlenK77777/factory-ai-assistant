@@ -16,14 +16,16 @@ def test_short_text_is_one_chunk():
     assert split_text("  Short instruction.  ") == ["Short instruction."]
 
 
-def test_chunks_are_not_longer_than_the_limit():
+def test_prose_chunks_respect_the_size_limit():
     chunks = split_text(LONG_TEXT)
     assert len(chunks) > 1
     assert all(len(chunk) <= CHUNK_SIZE for chunk in chunks)
 
 
-def test_chunks_overlap():
-    chunks = split_text(LONG_TEXT)
+def test_fallback_split_overlaps():
+    # No headings and no blank lines, so only the size fallback applies.
+    chunks = split_text(SENTENCE * 30)
+    assert len(chunks) > 1
     for previous, current in zip(chunks, chunks[1:]):
         assert current[:10] in previous[-CHUNK_OVERLAP - 10 :]
 
@@ -50,6 +52,40 @@ def test_text_without_spaces_is_still_split():
 def test_document_title_uses_first_heading():
     assert document_title("> note\n# WI-1 Title\n## Sub", fallback="file") == "WI-1 Title"
     assert document_title("no heading here", fallback="file") == "file"
+
+
+def test_sections_split_on_markdown_headings():
+    text = "# Title\n\nIntro.\n\n## First\n\nAlpha.\n\n## Second\n\nBeta."
+    chunks = split_text(text)
+    assert chunks[0].startswith("# Title")
+    assert any(chunk.startswith("## First") and "Alpha." in chunk for chunk in chunks)
+    assert any(chunk.startswith("## Second") and "Beta." in chunk for chunk in chunks)
+    assert not any("Alpha." in chunk and "Beta." in chunk for chunk in chunks)
+
+
+def test_numbered_list_stays_in_one_chunk_even_past_the_size_limit():
+    steps = "\n".join(f"{number}. " + ("action " * 20) for number in range(1, 8))
+    text = f"# Work\n\n## Immediate actions\n\n{steps}\n\n## Later\n\nDone."
+    assert len(steps) > CHUNK_SIZE
+    chunks = split_text(text)
+    lists = [chunk for chunk in chunks if "1. action" in chunk]
+    assert len(lists) == 1
+    assert "7. action" in lists[0]
+    assert "5. action" in lists[0]
+
+
+def test_delamination_immediate_actions_include_step_5():
+    text = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "docs"
+        / "instructions"
+        / "delamination-containment.md"
+    ).read_text(encoding="utf-8")
+    chunks = split_text(text)
+    immediate = [chunk for chunk in chunks if "Immediate actions" in chunk]
+    assert len(immediate) == 1
+    for step in ("1. Stop", "2. Attach", "3. Record", "4. Set", "5. Notify"):
+        assert step in immediate[0]
 
 
 def test_title_is_added_to_mid_document_chunks_only():

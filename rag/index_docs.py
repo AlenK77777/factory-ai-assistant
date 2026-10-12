@@ -1,8 +1,9 @@
 """Index the work instructions for search (RAG).
 
-Reads docs/instructions/*.md, splits every file into ~500-character chunks with
-~50 characters of overlap, gets an embedding for each chunk from Ollama
-(qwen3-embedding:0.6b, 1024 dimensions) and stores them in the doc_chunks table.
+Reads docs/instructions/*.md and splits each file on Markdown headings.
+A numbered list stays in one chunk. The character limit is only a fallback for
+a long section that has no list to keep whole. Embeddings come from Ollama
+(qwen3-embedding:0.6b, 1024 dimensions) and are stored in doc_chunks.
 
 Re-indexing replaces all old chunks in one transaction. All embeddings are
 fetched first, so if Ollama fails, the existing index is left untouched.
@@ -12,6 +13,7 @@ Usage (from the project root, venv active, Ollama running):
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -28,12 +30,72 @@ DOCS_DIR = ROOT / "docs" / "instructions"
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 
+_HEADING = re.compile(r"^#{1,6}\s+\S")
+_NUMBERED = re.compile(r"^\d+\.\s")
 
-def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Split text into chunks of at most `size` characters that overlap by about `overlap`.
 
-    A chunk ends at the last paragraph break, line break, sentence end or space in
-    its second half, so words and (where possible) sentences stay whole.
+def _is_heading(line: str) -> bool:
+    return _HEADING.match(line) is not None
+
+
+def _is_numbered(line: str) -> bool:
+    return _NUMBERED.match(line) is not None
+
+
+def split_sections(text: str) -> list[str]:
+    """One piece per Markdown heading. Text before the first heading stays together."""
+    sections: list[list[str]] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if _is_heading(line) and any(part.strip() for part in current):
+            sections.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if any(part.strip() for part in current):
+        sections.append(current)
+    return ["\n".join(lines).strip() for lines in sections]
+
+
+def _blocks(section: str) -> tuple[str, list[tuple[str, bool]]]:
+    """Split a section into a heading and blank-line blocks. A block is a numbered list if it contains one."""
+    lines = section.splitlines()
+    heading = ""
+    if lines and _is_heading(lines[0]):
+        heading = lines[0]
+        lines = lines[1:]
+
+    blocks: list[tuple[str, bool]] = []
+    buffer: list[str] = []
+
+    def flush() -> None:
+        if any(line.strip() for line in buffer):
+            body = "\n".join(buffer).strip()
+            blocks.append((body, any(_is_numbered(line) for line in buffer)))
+        buffer.clear()
+
+    for line in lines:
+        if not line.strip():
+            flush()
+        else:
+            buffer.append(line)
+    flush()
+
+    # A blank line must not break one numbered list into two chunks.
+    merged: list[tuple[str, bool]] = []
+    for body, numbered in blocks:
+        if numbered and merged and merged[-1][1]:
+            merged[-1] = (merged[-1][0] + "\n\n" + body, True)
+        else:
+            merged.append((body, numbered))
+    return heading, merged
+
+
+def split_by_size(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Fallback for a long block that is not a numbered list.
+
+    Cuts at a paragraph, line, sentence or word in the second half of the window,
+    and overlaps the next chunk by about `overlap` characters.
     """
     text = text.strip()
     chunks = []
@@ -53,10 +115,59 @@ def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
         if end >= len(text):
             break
 
-        # Step back by the overlap, then forward to the next word start.
         next_start = end - overlap
         space = text.find(" ", next_start, end)
         start = space + 1 if space != -1 else next_start
+    return chunks
+
+
+def _with_heading(heading: str, body: str) -> str:
+    return f"{heading}\n\n{body}".strip() if heading else body
+
+
+def split_section(section: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Keep a short section whole. A longer one is packed by block, and a numbered list is never cut."""
+    section = section.strip()
+    if len(section) <= size:
+        return [section]
+
+    heading, blocks = _blocks(section)
+    chunks: list[str] = []
+    current: list[str] = []
+    heading_len = len(heading) + 2 if heading else 0
+    current_len = heading_len
+
+    def emit() -> None:
+        nonlocal current, current_len
+        if current:
+            chunks.append(_with_heading(heading, "\n\n".join(current)))
+            current = []
+            current_len = heading_len
+
+    for body, numbered in blocks:
+        if numbered or len(body) <= size:
+            extra = len(body) if not current else len(body) + 2
+            if current and current_len + extra > size:
+                emit()
+            current.append(body)
+            current_len += len(body) if len(current) == 1 else len(body) + 2
+            continue
+
+        emit()
+        for piece in split_by_size(body, size, overlap):
+            chunks.append(_with_heading(heading, piece))
+    emit()
+    return chunks
+
+
+def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Split on Markdown headings. Never split a numbered list. Use `size` only as a fallback."""
+    text = text.strip()
+    if not text:
+        return []
+    chunks = []
+    for section in split_sections(text):
+        chunks.extend(split_section(section, size, overlap))
     return chunks
 
 

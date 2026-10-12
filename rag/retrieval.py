@@ -19,11 +19,13 @@ from rag.embeddings import embed_query, to_pgvector
 # the question.
 MIN_RELEVANT_SIMILARITY = 0.48
 
-# Measured recall@k on 12 EN/RU/HE questions (file-level / required-chunk):
-#   k=4: mean file 0.97, required-chunk 0.83  (English delamination chunk #1 is rank 5)
-#   k=6: mean file 0.97, required-chunk 1.00
-#   k=8: mean file 1.00, required-chunk 1.00  (adds off-topic files; unused-source risk)
-# k=6 is the smallest value that always retrieves the required procedure chunks.
+# Measured again after structure-aware chunking (12 EN/RU/HE questions).
+# The immediate-actions list is now one chunk, but for
+# "What should I do if delamination is found?" that chunk is rank 6.
+#   k=4: file 12/12, 12/12, 11/12; required text 9/10, 10/10, 9/10
+#   k=6: file 12/12 and required text 10/10 in every language
+#   k=8: same hits as k=6
+# k=6 is still the smallest value that always retrieves the required steps.
 DEFAULT_K = 6
 
 SEARCH_SQL = """
@@ -39,8 +41,11 @@ def search_chunks(conn, query: str, k: int = DEFAULT_K) -> list[dict]:
 
     Each chunk is a dict with source, chunk_index, content, distance (cosine,
     pgvector <=>), similarity (1 - distance) and relevant (similarity above the
-    threshold). Raises OllamaError if the question cannot be embedded.
+    threshold). A request for fewer than DEFAULT_K chunks is raised to DEFAULT_K:
+    that is the measured minimum that still retrieves the required procedure steps.
+    Raises OllamaError if the question cannot be embedded.
     """
+    k = max(k, DEFAULT_K)
     query_vector = to_pgvector(embed_query(query))
     with conn.cursor(row_factory=dict_row) as cur:
         rows = cur.execute(SEARCH_SQL, {"query": query_vector, "k": k}).fetchall()

@@ -31,6 +31,9 @@ flowchart LR
     CLIENT[Cursor / Claude Desktop] <--> MCP[MCP server<br/>Python, stdio]
     MCP -->|read-only role| DB
     LOCAL[rag/ask_local.py<br/>local model via Ollama] --> DB
+    EMP[Browser :7777] --> CHAT[chat/server.py<br/>MCP client]
+    CHAT <--> MCP
+    CHAT -->|tool calling| OLLAMA[Ollama]
     USER[Browser] --> NGINX[NGINX port 8080] --> DASH[Streamlit dashboard<br/>Docker]
     DASH --> DB
 ```
@@ -41,6 +44,7 @@ flowchart LR
 | Streamlit dashboard | Docker | 8501 (internal only) |
 | NGINX reverse proxy | Docker | 8080 → dashboard |
 | MCP server | Windows, Python venv, stdio | none |
+| Employee chat | Windows, Python venv | 7777 (127.0.0.1 only) |
 | Ollama (`qwen3-embedding:0.6b` + `qwen3:8b`) | Windows, native | 11434 |
 
 ## Design principles
@@ -65,6 +69,7 @@ factory-ai-assistant/
 ├── scripts/generate_data.py
 ├── ingest/load_excel.py
 ├── mcp_server/server.py
+├── chat/server.py            # employee web chat (MCP client)
 ├── rag/index_docs.py
 ├── rag/ask_local.py
 ├── dashboard/app.py
@@ -161,6 +166,28 @@ Acceptance criteria:
 - [ ] The output is always valid JSON that matches the schema.
 - [ ] `sources` lists the instruction files actually used.
 - [ ] For an off-topic question `found` is false and the answer says so, with no invented content.
+
+## Step 5a: Employee web chat (before the dashboard)
+
+A browser chat for people who do not use an IDE. `chat/server.py` listens on `127.0.0.1:7777` only. It is an MCP client of the existing factory-db server (the same 4 tools) and calls the local Ollama chat model with tool calling. The model name is `OLLAMA_CHAT_MODEL` in `.env`. The page keeps the last few turns, answers in the question's language (English, Russian or Hebrew), and shows a collapsible "How I got this" trace under each answer.
+
+`get_order_status` also returns defects grouped by type, so a follow-up such as "what type are its defects?" can be answered from that tool.
+
+```powershell
+python chat/server.py
+```
+
+Stop with Ctrl+C in that window.
+
+Acceptance criteria:
+
+- [ ] http://127.0.0.1:7777 loads in a browser.
+- [ ] A question about an order calls `get_order_status`, and the answer matches the database.
+- [ ] A question about a procedure calls `search_instructions` and names the instruction file.
+- [ ] A follow-up uses the earlier order without the user repeating the id.
+- [ ] The same questions in Russian and Hebrew are answered in that language, and Hebrew is right-to-left.
+- [ ] An off-topic question says that nothing relevant was found.
+- [ ] "How I got this" shows the tool, its arguments, the JSON result, and the model and time.
 
 ## Step 5: KPI dashboard behind NGINX (Thursday)
 
