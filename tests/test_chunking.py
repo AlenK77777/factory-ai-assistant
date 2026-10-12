@@ -1,6 +1,6 @@
 """Unit tests for chunking and vector formatting. No database or Ollama needed."""
 
-from rag.embeddings import to_pgvector
+from rag.embeddings import EMBED_DIMENSIONS, EMBED_MODEL, to_pgvector
 from rag.index_docs import CHUNK_OVERLAP, CHUNK_SIZE, document_title, split_text, text_to_embed
 
 SENTENCE = "Stop the lot and attach a red HOLD tag to every affected panel. "
@@ -58,3 +58,8 @@ def test_title_is_added_to_mid_document_chunks_only():
 
 def test_pgvector_text_format():
     assert to_pgvector([0.5, -1, 2.25]) == "[0.5,-1.0,2.25]"
+
+
+def test_embedding_model_is_multilingual_1024():
+    assert EMBED_MODEL == "qwen3-embedding:0.6b"
+    assert EMBED_DIMENSIONS == 1024

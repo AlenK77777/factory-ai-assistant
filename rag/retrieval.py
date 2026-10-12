@@ -8,11 +8,16 @@ from psycopg.rows import dict_row
 
 from rag.embeddings import embed_query, to_pgvector
 
-# Measured with nomic-embed-text on docs/instructions (best chunk per question):
-# on-topic questions 0.64-0.84, clearly unrelated ones 0.44-0.59, but other
-# workplace questions (parking, IT) reach 0.63-0.68. So "relevant" is a hint,
-# not proof; whoever answers must still check that the text answers the question.
-MIN_RELEVANT_SIMILARITY = 0.65
+# Measured with qwen3-embedding:0.6b on docs/instructions, 12 on-topic and
+# 9 off-topic questions in English, Russian and Hebrew (best chunk each):
+#   English  on-topic 0.63-0.82, off-topic 0.15-0.51
+#   Russian  on-topic 0.49-0.63, off-topic 0.10-0.45
+#   Hebrew   on-topic 0.48-0.63, off-topic 0.20-0.51
+# 0.48 is the value with the fewest mistakes across the three languages.
+# Hebrew on-topic and workplace off-topic still overlap, so "relevant" is a
+# hint, not proof; whoever answers must still check that the text answers
+# the question.
+MIN_RELEVANT_SIMILARITY = 0.48
 
 SEARCH_SQL = """
     SELECT source, chunk_index, content, embedding <=> %(query)s::vector AS distance

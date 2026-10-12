@@ -2,7 +2,7 @@
 
 Reads docs/instructions/*.md, splits every file into ~500-character chunks with
 ~50 characters of overlap, gets an embedding for each chunk from Ollama
-(nomic-embed-text) and stores them in the doc_chunks table.
+(qwen3-embedding:0.6b, 1024 dimensions) and stores them in the doc_chunks table.
 
 Re-indexing replaces all old chunks in one transaction. All embeddings are
 fetched first, so if Ollama fails, the existing index is left untouched.

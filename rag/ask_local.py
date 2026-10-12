@@ -3,10 +3,13 @@
 1. Find the closest work-instruction chunks (the same retrieval as the MCP tool).
 2. Ask the local chat model (qwen3:8b) to answer ONLY from those chunks.
    Ollama's structured output ("format" = JSON schema) constrains the reply to
-   {"answer": str, "sources": [str], "found": bool}.
+   {"language": <detected>, "answer": str, "sources": [str], "found": bool}.
+   language is pinned in the schema to the question's script (en / ru / he), so
+   the model has to commit to that language before it writes the answer.
 3. Validate the reply with pydantic and check that it is consistent (sources are
-   real retrieved files, found agrees with sources). If not, retry once and tell
-   the model what was wrong. If the retry also fails, print a safe "not found" answer.
+   real retrieved files, found agrees with sources, answer is in the expected
+   script). If not, retry once and tell the model what was wrong. If the retry
+   also fails, print a safe "not found" answer in the question's language.
 
 Thinking: qwen3 is a thinking model, and Ollama lets it think by default, so this
 script always sets Ollama's "think" option explicitly:
@@ -28,21 +31,28 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Literal
 
 import psycopg
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 ROOT = Path(__file__).resolve().parent.parent
 # Lets "python rag/ask_local.py" import project modules such as rag.retrieval.
 sys.path.insert(0, str(ROOT))
 
 from rag.embeddings import OllamaError, post_json  # noqa: E402
+from rag.language import (  # noqa: E402
+    FAILED,
+    LANGUAGE_NAMES,
+    NOT_FOUND,
+    Language,
+    answer_in_language,
+    detect_language,
+)
 from rag.retrieval import search_chunks  # noqa: E402
 
 MAX_ATTEMPTS = 2  # the first try plus one retry
-NOT_FOUND_ANSWER = "No relevant work instruction was found for this question."
-FAILED_ANSWER = "The local model did not return a valid answer. Please try again or ask a QA engineer."
 
 # Without thinking: temperature 0 gives repeatable answers and latency measurements.
 ANSWER_OPTIONS = {"temperature": 0, "num_ctx": 8192, "num_predict": 1024}
@@ -50,29 +60,43 @@ ANSWER_OPTIONS = {"temperature": 0, "num_ctx": 8192, "num_predict": 1024}
 # and room for the reasoning tokens, which count towards num_predict.
 THINKING_OPTIONS = {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "num_ctx": 8192, "num_predict": 4096}
 
-SYSTEM_PROMPT = f"""You answer questions from shift managers, QA engineers and planners in a PCB factory.
+SYSTEM_PROMPT = """You answer questions from shift managers, QA engineers and planners in a PCB factory.
 Use ONLY the work-instruction excerpts in the user's message. Never use general knowledge and never guess.
 
 If the excerpts answer the question:
 - set "found" to true;
 - give a short, practical answer (numbered steps if it is a procedure);
-- list in "sources" the file names of the excerpts you actually used, exactly as written after "source:".
+- write "answer" in the language named in the JSON schema's "language" field (translate the facts from the excerpts; do not add any);
+- keep file names in "sources" exactly as written after "source:".
 
 If the excerpts do not answer the question:
-- set "found" to false, "sources" to [] and "answer" to "{NOT_FOUND_ANSWER}"
+- set "found" to false and "sources" to [];
+- set "answer" to the "not found" sentence given in the user message.
 
-Reply with JSON only: {{"answer": string, "sources": [string], "found": boolean}}."""
-
-
-class LocalAnswer(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    answer: str = Field(min_length=1)
-    sources: list[str]
-    found: bool
+Reply with JSON only."""
 
 
-ANSWER_SCHEMA = LocalAnswer.model_json_schema()
+def answer_model_for(language: Language) -> type[BaseModel]:
+    """Pydantic model whose first field is language, pinned to one value.
+
+    Ollama's structured output uses this model's JSON schema, so the model must
+    emit that language code before it writes the answer.
+    """
+    language_field = Literal[language]  # type: ignore[valid-type]
+    return create_model(
+        "LocalAnswer",
+        __config__=ConfigDict(extra="forbid"),
+        language=(
+            language_field,
+            Field(description=f"Must be '{language}'. Write 'answer' in {LANGUAGE_NAMES[language]}."),
+        ),
+        answer=(
+            str,
+            Field(min_length=1, description=f"The answer, written in {LANGUAGE_NAMES[language]}."),
+        ),
+        sources=(list[str], ...),
+        found=(bool, ...),
+    )
 
 
 def info(*parts) -> None:
@@ -80,24 +104,36 @@ def info(*parts) -> None:
     print(*parts, file=sys.stderr)
 
 
-def build_messages(question: str, chunks: list[dict]) -> list[dict]:
+def build_messages(question: str, chunks: list[dict], language: Language) -> list[dict]:
     """The chat messages for the model: rules, then the excerpts and the question."""
     excerpts = "\n\n".join(
         f"[{number}] source: {chunk['source']}\n{chunk['content']}" for number, chunk in enumerate(chunks, 1)
     )
+    name = LANGUAGE_NAMES[language]
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Work-instruction excerpts:\n\n{excerpts}\n\nQuestion: {question}"},
+        {
+            "role": "user",
+            "content": (
+                f"Work-instruction excerpts:\n\n{excerpts}\n\n"
+                f"Question: {question}\n\n"
+                f'The JSON schema requires "language": "{language}". '
+                f'Write "answer" in {name}. '
+                f'If nothing in the excerpts answers the question, set found=false, sources=[], '
+                f'and answer="{NOT_FOUND[language]}"'
+            ),
+        },
     ]
 
 
-def parse_answer(content: str, allowed_sources: set[str]) -> LocalAnswer:
+def parse_answer(content: str, allowed_sources: set[str], language: Language) -> BaseModel:
     """Validate the model's reply. Raises ValueError (pydantic's ValidationError is one) with the reason.
 
-    When found is false the answer is replaced by the fixed NOT_FOUND_ANSWER, so a
-    "not found" reply can never carry invented content.
+    When found is false the answer is replaced by the fixed NOT_FOUND text in the
+    question's language, so a "not found" reply can never carry invented content.
     """
-    answer = LocalAnswer.model_validate_json(content)
+    model = answer_model_for(language)
+    answer = model.model_validate_json(content)
     sources = list(dict.fromkeys(source.strip() for source in answer.sources))
 
     unknown = [source for source in sources if source not in allowed_sources]
@@ -107,24 +143,29 @@ def parse_answer(content: str, allowed_sources: set[str]) -> LocalAnswer:
         raise ValueError('"found" is true but "sources" is empty')
     if not answer.found and sources:
         raise ValueError('"found" is false but "sources" is not empty')
+    if answer.found and not answer_in_language(answer.answer, language):
+        raise ValueError(
+            f'"answer" must be written in {LANGUAGE_NAMES[language]} '
+            f'(language="{language}"); translate the facts, keep plant codes such as ESD as they are'
+        )
 
     if not answer.found:
-        return LocalAnswer(answer=NOT_FOUND_ANSWER, sources=[], found=False)
-    return LocalAnswer(answer=answer.answer.strip(), sources=sources, found=True)
+        return model(language=language, answer=NOT_FOUND[language], sources=[], found=False)
+    return model(language=language, answer=answer.answer.strip(), sources=sources, found=True)
 
 
 def chat_model() -> str:
     return os.getenv("OLLAMA_CHAT_MODEL", "qwen3:8b")
 
 
-def call_model(messages: list[dict], think: bool) -> dict:
+def call_model(messages: list[dict], think: bool, schema: dict) -> dict:
     """One non-streaming chat request with the answer schema as structured output."""
     return post_json(
         "/api/chat",
         {
             "model": chat_model(),
             "messages": messages,
-            "format": ANSWER_SCHEMA,
+            "format": schema,
             "think": think,
             "stream": False,
             "options": THINKING_OPTIONS if think else ANSWER_OPTIONS,
@@ -133,18 +174,20 @@ def call_model(messages: list[dict], think: bool) -> dict:
     )
 
 
-def ask_model(question: str, chunks: list[dict], think: bool) -> tuple[LocalAnswer | None, list[dict]]:
-    """Ask the model, retrying once on an invalid reply. Returns (answer or None, raw responses)."""
-    messages = build_messages(question, chunks)
+def ask_model(question: str, chunks: list[dict], think: bool) -> tuple[BaseModel | None, list[dict], Language]:
+    """Ask the model, retrying once on an invalid reply. Returns (answer or None, raw responses, language)."""
+    language = detect_language(question)
+    schema = answer_model_for(language).model_json_schema()
+    messages = build_messages(question, chunks, language)
     allowed_sources = {chunk["source"] for chunk in chunks}
     responses = []
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        response = call_model(messages, think)
+        response = call_model(messages, think, schema)
         responses.append(response)
         content = response["message"]["content"]
         try:
-            return parse_answer(content, allowed_sources), responses
+            return parse_answer(content, allowed_sources, language), responses, language
         except ValueError as error:
             reason = str(error)[:300]
             info(f"Attempt {attempt}: invalid reply ({reason})")
@@ -154,7 +197,7 @@ def ask_model(question: str, chunks: list[dict], think: bool) -> tuple[LocalAnsw
                 {"role": "assistant", "content": content},
                 {"role": "user", "content": f"Your reply was invalid: {reason}\nReply again with JSON only, following the rules."},
             ]
-    return None, responses
+    return None, responses, language
 
 
 def connect_read_only() -> psycopg.Connection:
@@ -232,14 +275,16 @@ def main() -> None:
         info(f"  {chunk['similarity']:.3f}  {chunk['source']} #{chunk['chunk_index']}")
 
     try:
-        answer, responses = ask_model(question, chunks, args.think)
+        answer, responses, language = ask_model(question, chunks, args.think)
     except OllamaError as error:
         sys.exit(str(error))
     total_s = time.perf_counter() - started
 
     exit_code = 0
     if answer is None:
-        answer = LocalAnswer(answer=FAILED_ANSWER, sources=[], found=False)
+        answer = answer_model_for(language)(
+            language=language, answer=FAILED[language], sources=[], found=False
+        )
         exit_code = 1
 
     print(json.dumps(answer.model_dump(), indent=2, ensure_ascii=False))

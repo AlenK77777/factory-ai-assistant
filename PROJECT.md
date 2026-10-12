@@ -17,7 +17,7 @@ Users (shift managers, QA engineers, planners) can:
 ## Environment
 
 - Windows 10, PowerShell, Docker Desktop, Python 3.10+ in a venv, Git, GitHub.
-- Ollama runs natively on Windows (from Step 3), on an RTX 5070 (12 GB): `nomic-embed-text` for embeddings, `qwen3:8b` as the local chat model.
+- Ollama runs natively on Windows (from Step 3), on an RTX 5070 (12 GB): `qwen3-embedding:0.6b` for multilingual embeddings (1024 dimensions), `qwen3:8b` as the local chat model.
 - All commands in this project are for PowerShell.
 
 ## Architecture
@@ -41,7 +41,7 @@ flowchart LR
 | Streamlit dashboard | Docker | 8501 (internal only) |
 | NGINX reverse proxy | Docker | 8080 → dashboard |
 | MCP server | Windows, Python venv, stdio | none |
-| Ollama (`nomic-embed-text` + `qwen3:8b`) | Windows, native | 11434 |
+| Ollama (`qwen3-embedding:0.6b` + `qwen3:8b`) | Windows, native | 11434 |
 
 ## Design principles
 
@@ -141,9 +141,9 @@ Acceptance criteria:
 
 ## Step 3: RAG over work instructions (Wednesday)
 
-- Install Ollama for Windows; pull `nomic-embed-text` (embeddings, 768 dimensions) and the chat model `qwen3:8b` (fits the 12 GB GPU together with the embedding model).
+- Install Ollama for Windows; pull `qwen3-embedding:0.6b` (multilingual embeddings, 1024 dimensions; chosen over `bge-m3` after a measurement on this project's EN/RU/HE questions) and the chat model `qwen3:8b` (fits the 12 GB GPU together with the embedding model).
 - Write 6–8 short synthetic work instructions in `docs/instructions/*.md`: AOI false-call handling, delamination containment, ESD rules, order hold and release, electrical test failure triage, solder mask touch-up limits. Mark each file "Synthetic, for demo only".
-- `rag/index_docs.py`: split into chunks (~500 characters, ~50 overlap), get embeddings from Ollama, store them in `doc_chunks(id, source, chunk_index, content, embedding vector(768))`; re-indexing replaces the old chunks.
+- `rag/index_docs.py`: split into chunks (~500 characters, ~50 overlap), get embeddings from Ollama, store them in `doc_chunks(id, source, chunk_index, content, embedding vector(1024))`; re-indexing replaces the old chunks.
 - Add the MCP tool `search_instructions(query, k=4)` → top-k chunks with the source file and a similarity score (cosine distance, `<=>`).
 
 Acceptance criteria:
@@ -154,7 +154,7 @@ Acceptance criteria:
 
 ## Step 4: Fully on-premise answer with structured output (Wednesday/Thursday)
 
-- `rag/ask_local.py "question"`: retrieves chunks, asks the local Ollama chat model (`qwen3:8b`) to answer ONLY from those chunks, using Ollama's structured output with the schema `{ "answer": str, "sources": [str], "found": bool }`; validates the result with pydantic; retries once if the JSON is invalid.
+- `rag/ask_local.py "question"`: retrieves chunks, asks the local Ollama chat model (`qwen3:8b`) to answer ONLY from those chunks, using Ollama's structured output with the schema `{ "language": "en"|"ru"|"he", "answer": str, "sources": [str], "found": bool }` (`language` is pinned to the question's script); validates the result with pydantic; retries once if the JSON is invalid.
 
 Acceptance criteria:
 

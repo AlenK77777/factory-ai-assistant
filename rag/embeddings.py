@@ -1,9 +1,13 @@
 """Embeddings from the local Ollama server, shared by the indexer and the MCP server.
 
 Calls Ollama's REST API with the Python standard library only (no extra packages).
-nomic-embed-text expects a task prefix: "search_document: " for stored text and
-"search_query: " for questions. Indexing and searching must use the same model
-and prefixes, which is why both go through this module.
+qwen3-embedding is multilingual: a Hebrew or Russian question finds English
+instructions (and future Hebrew ones). Documents are embedded as they are;
+questions get a task instruction in front, as the model expects. Indexing and
+searching must use the same model and prefixes, which is why both go through
+this module. Changing the model means changing vector(...) in
+db/init/03_doc_chunks.sql, re-indexing and recalibrating the thresholds in
+rag/retrieval.py.
 """
 
 import json
@@ -11,10 +15,13 @@ import os
 import urllib.error
 import urllib.request
 
-EMBED_MODEL = "nomic-embed-text"
-EMBED_DIMENSIONS = 768  # must match vector(768) in db/init/03_doc_chunks.sql
-DOCUMENT_PREFIX = "search_document: "
-QUERY_PREFIX = "search_query: "
+EMBED_MODEL = "qwen3-embedding:0.6b"
+EMBED_DIMENSIONS = 1024  # must match vector(1024) in db/init/03_doc_chunks.sql
+DOCUMENT_PREFIX = ""
+QUERY_PREFIX = (
+    "Instruct: Given a question from a PCB factory worker, "
+    "retrieve work-instruction passages that answer it\nQuery: "
+)
 
 # Ollama runs locally: never send these requests through a system proxy.
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -47,7 +54,7 @@ def post_json(path: str, payload: dict, timeout: float = 120) -> dict:
 
 
 def embed(texts: list[str], prefix: str) -> list[list[float]]:
-    """Return one 768-number vector per text."""
+    """Return one EMBED_DIMENSIONS-number vector per text."""
     if not texts:
         return []
     data = post_json("/api/embed", {"model": EMBED_MODEL, "input": [prefix + text for text in texts]})
