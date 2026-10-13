@@ -323,7 +323,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from chat.event_log import log_event
+
     args = parse_args()
+    try:
+        _load(args, log_event)
+    except (Exception, SystemExit) as error:
+        detail = error.code if isinstance(error, SystemExit) else error
+        log_event("ERROR", "ingest", "excel", error=str(detail))
+        raise
+
+
+def _load(args, log_event) -> None:
     orders_df = read_excel(args.orders, ORDER_COLUMNS)
     defects_df = read_excel(args.defects, DEFECT_COLUMNS)
 
@@ -351,6 +364,8 @@ def main() -> None:
     print(f"  {args.defects.name}: {len(valid_defects)} loaded, {len(rejected_defects)} rejected")
     print(f"  Rejected rows written to {REJECTED_CSV.relative_to(ROOT)} ({len(rejected)} rows)")
     print(f"  Database now holds {total_orders} orders and {total_defects} defects")
+    log_event("INFO", "ingest", "excel", file=args.orders.name, rows_loaded=len(valid_orders), rows_rejected=len(rejected_orders))
+    log_event("INFO", "ingest", "excel", file=args.defects.name, rows_loaded=len(valid_defects), rows_rejected=len(rejected_defects))
 
 
 if __name__ == "__main__":

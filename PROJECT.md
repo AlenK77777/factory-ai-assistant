@@ -66,14 +66,15 @@ factory-ai-assistant/
 ├── db/init/01_schema.sql
 ├── scripts/generate_data.py
 ├── scripts/generate_certs.ps1   # local HTTPS certificate and admin password file
-├── scripts/smoke_proxy.ps1      # checks the NGINX proxy
+├── scripts/smoke_proxy.ps1      # checks the NGINX proxy, admin login, dashboards and logs
 ├── ingest/load_excel.py
 ├── mcp_server/server.py
 ├── chat/server.py            # employee web chat (MCP client)
+├── chat/event_log.py         # one line per event in logs/events.log
 ├── rag/index_docs.py
 ├── rag/ask_local.py
-├── dashboard/app.py
-├── dashboard/Dockerfile
+├── dashboard/data.py         # production KPIs and assistant stats
+├── dashboard/render.py       # offline HTML (inline SVG) and Excel workbook
 ├── nginx/nginx.conf
 ├── data/                     # generated Excel files
 ├── docs/instructions/        # synthetic work instructions for RAG
@@ -191,15 +192,17 @@ Acceptance criteria:
 
 ## Step 5: NGINX in front of the chat (dashboard later)
 
-NGINX (`nginx:1.28.0-alpine`) publishes only `127.0.0.1:8088` and `127.0.0.1:8443`. HTTP redirects to HTTPS. The certificate is self-signed (`scripts/generate_certs.ps1`) and is not committed. NGINX proxies to the chat on the Windows host (`host.docker.internal:7777`). The employee chat is open. `/admin` and the settings API ask for a password (basic auth; the password is `ADMIN_PASSWORD` in `.env`). The chat app checks that same password, so http://127.0.0.1:7777/admin is not a way around NGINX.
+NGINX (`nginx:1.28.0-alpine`) publishes only `127.0.0.1:8088` and `127.0.0.1:8443`. HTTP redirects to HTTPS. The certificate is self-signed (`scripts/generate_certs.ps1`) and is not committed. NGINX proxies to the chat on the Windows host (`host.docker.internal:7777`). The employee chat is open. `/admin`, `/dashboards`, `/logs` and their APIs ask for a password (basic auth; the password is `ADMIN_PASSWORD` in `.env`). The chat app checks that same password, so opening those pages on http://127.0.0.1:7777 is not a way around NGINX.
+
+The chat page has three columns: Dashboards and Logs on the left, the conversation in the middle, admin settings on the right. Dashboards is built when you click it (production numbers from the database, assistant numbers from `logs/events.log`). Logs shows the latest events and can download the whole file. Both HTML and Excel downloads are generated on the server. The HTML file is self-contained (inline SVG, no CDN). The workbook uses native Excel charts.
+
+One event is one line in `logs/events.log`: time with timezone, level, component, event name, then `key=value` details. The file rotates by size. Questions are cut to 200 characters. Passwords are not written.
 
 Double-click `start-chat.bat`. It opens https://localhost:8443. http://127.0.0.1:7777 still works for debugging. `stop-chat.bat` stops the chat and NGINX. `stop-chat.bat all` also stops the database container.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\smoke_proxy.ps1
 ```
-
-The KPI dashboard (Streamlit) is not built yet. When it is added, it can sit behind this same proxy.
 
 Acceptance criteria:
 
@@ -208,6 +211,9 @@ Acceptance criteria:
 - [ ] https://localhost:8443/admin asks for the admin password. Without it, `/api/settings` returns 401.
 - [ ] http://127.0.0.1:7777 still opens the chat directly.
 - [ ] `logs/nginx/access.log` records the requests.
+- [ ] https://localhost:8443/dashboards and /logs ask for the admin password. The same URLs on port 7777 do too. The employee chat stays open.
+- [ ] Dashboards shows production KPIs and, after a few questions, assistant stats. Download HTML works offline. Download Excel opens with editable charts.
+- [ ] Logs shows recent events and Download saves `events.txt` in time order. `logs/events.log` has one event per line and does not contain the admin password.
 
 ## Step 6: CI with GitHub Actions (Friday)
 

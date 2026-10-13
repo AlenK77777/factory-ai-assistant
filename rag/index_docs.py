@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Lets "python rag/index_docs.py" import project modules such as rag.embeddings.
 sys.path.insert(0, str(ROOT))
 
+from chat.event_log import log_event  # noqa: E402
 from rag.embeddings import OllamaError, embed_documents, to_pgvector  # noqa: E402
 
 DOCS_DIR = ROOT / "docs" / "instructions"
@@ -212,7 +213,7 @@ def connect() -> psycopg.Connection:
         ) from error
 
 
-def index_documents(settings: dict, on_progress=None) -> dict:
+def _index_documents(settings: dict, on_progress=None) -> dict:
     """Embed every instruction and replace doc_chunks in one transaction.
 
     Embeddings are built first. If the new model uses a different vector size,
@@ -274,6 +275,32 @@ def index_documents(settings: dict, on_progress=None) -> dict:
         ) from error
     report("save", f"Stored {len(rows)} chunks from {len(files)} files", chunks=len(rows))
     return {"chunks": len(rows), "files": len(files), "dimensions": dimensions, "migrated": migrated}
+
+
+def index_documents(settings: dict, on_progress=None) -> dict:
+    """Embed every instruction, replace doc_chunks, and record the run in the event log."""
+    try:
+        result = _index_documents(settings, on_progress)
+    except Exception as error:
+        log_event(
+            "ERROR",
+            "index",
+            "reindex",
+            model=str(settings.get("embedding_model", "")),
+            error=str(error),
+        )
+        raise
+    log_event(
+        "INFO",
+        "index",
+        "reindex",
+        model=str(settings.get("embedding_model", "")),
+        files=result.get("files"),
+        chunks=result.get("chunks"),
+        dimensions=result.get("dimensions"),
+        migrated=bool(result.get("migrated")),
+    )
+    return result
 
 
 def main() -> None:

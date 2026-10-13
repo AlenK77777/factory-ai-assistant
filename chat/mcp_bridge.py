@@ -1,6 +1,6 @@
 """A long-lived MCP client for the factory-db server.
 
-The web app calls tools only through this bridge. It never opens the database.
+The web app calls tools only through this bridge. Tool calls do not open the database.
 
 The stdio connection uses a cancel scope, which must be entered and exited by
 the same task. Every open, call, restart and close therefore runs on one

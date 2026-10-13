@@ -1,6 +1,6 @@
 """The admin password check. No server and no .env."""
 
-from chat.admin_auth import basic_auth_matches
+from chat.admin_auth import basic_auth_matches, basic_username
 
 
 def header(user: str, password: str) -> str:
@@ -25,3 +25,8 @@ def test_wrong_user_is_rejected():
 
 def test_correct_password_is_accepted():
     assert basic_auth_matches(header("admin", "secret"), "admin", "secret") is True
+
+
+def test_username_helper_does_not_return_the_password():
+    assert basic_username(header("admin", "s3cret-value")) == "admin"
+    assert basic_username(None) == ""

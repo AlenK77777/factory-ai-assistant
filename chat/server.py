@@ -1,7 +1,8 @@
 """Web chat for plant employees. http://127.0.0.1:7777
 
 The browser talks only to this process. This process is an MCP client of
-factory-db and calls the local Ollama model. It does not open the database.
+factory-db and calls the local Ollama model. Tool calls do not open the
+database. The dashboard reads it with the read-only role.
 
 Start (from the project root, venv active):
     python chat/server.py
@@ -14,6 +15,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,10 +28,12 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 
-from chat.admin_auth import basic_auth_matches  # noqa: E402
+from chat.admin_auth import basic_auth_matches, basic_username  # noqa: E402
+from chat.event_log import classify_outcome, get_log, log_event  # noqa: E402
 from chat.loop import run_turn  # noqa: E402
 from chat.mcp_bridge import McpBridge  # noqa: E402
 from chat.settings import field_specs, load_settings, review, reindex_confirmation_error, update_saved  # noqa: E402
+from dashboard.render import render_excel, render_html, snapshot  # noqa: E402
 from rag.embeddings import OllamaError, ollama_url, post_json  # noqa: E402
 from rag.index_docs import index_documents  # noqa: E402
 from rag.language import detect_language  # noqa: E402
@@ -164,13 +168,20 @@ def read_body(handler: BaseHTTPRequestHandler) -> dict:
 
 class ChatHandler(BaseHTTPRequestHandler):
     server_version = "factory-chat/1.0"
+    _seen_admins: set[str] = set()
 
     def _admin_required(self) -> bool:
-        """True for the admin page and the settings API. The employee chat is not included."""
+        """True for admin, dashboards and logs. The employee chat is not included."""
         path = self.path.split("?")[0]
-        if path in ("/admin", "/admin/"):
+        if path in ("/admin", "/admin/", "/dashboards", "/dashboards/", "/logs", "/logs/"):
             return True
-        return path == "/api/settings" or path.startswith("/api/settings/") or path.startswith("/api/mcp/")
+        return (
+            path == "/api/settings"
+            or path.startswith("/api/settings/")
+            or path.startswith("/api/mcp/")
+            or path.startswith("/api/dashboards")
+            or path.startswith("/api/logs")
+        )
 
     def _reject_admin(self) -> None:
         body = b'{"error":"Admin password required."}'
@@ -187,24 +198,53 @@ class ChatHandler(BaseHTTPRequestHandler):
             return True
         user = os.getenv("ADMIN_USER", "admin")
         password = os.getenv("ADMIN_PASSWORD", "")
+        path = self.path.split("?")[0]
         if not password or password == "change-me-admin":
+            log_event("ERROR", "admin", "login", outcome="error", path=path, detail="ADMIN_PASSWORD is not set")
             self._send_json(503, {"error": "Set ADMIN_PASSWORD in .env, then run scripts\\generate_certs.ps1."})
             return False
         if basic_auth_matches(self.headers.get("Authorization"), user, password):
+            if user not in ChatHandler._seen_admins:
+                ChatHandler._seen_admins.add(user)
+                log_event("INFO", "admin", "login", outcome="success", user=user, path=path)
             return True
+        # The header is not written. Only the user name, when it can be read.
+        log_event(
+            "WARNING",
+            "admin",
+            "login",
+            outcome="failure",
+            user=basic_username(self.headers.get("Authorization")),
+            path=path,
+        )
         self._reject_admin()
         return False
 
     def do_GET(self) -> None:  # noqa: N802
         if not self._allow_admin():
             return
-        if self.path.split("?")[0] in ("/", "/index.html", "/admin", "/admin/"):
+        parsed = urllib.parse.urlsplit(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        if path in ("/", "/index.html", "/admin", "/admin/", "/dashboards", "/dashboards/", "/logs", "/logs/"):
             self._send(200, STATIC_PAGE.read_bytes(), "text/html; charset=utf-8")
             return
-        if self.path == "/api/health":
+        if path == "/api/health":
             self._send_json(200, self._health())
             return
-        if self.path == "/api/settings":
+        if path in ("/api/logs", "/api/logs/"):
+            self._logs(query)
+            return
+        if path == "/api/logs/download":
+            self._download_log()
+            return
+        if path in ("/api/dashboards", "/api/dashboards/"):
+            self._dashboard()
+            return
+        if path == "/api/dashboards/excel":
+            self._dashboard_excel()
+            return
+        if path == "/api/settings":
             current = chat_settings()
             self._send_json(
                 200,
@@ -250,17 +290,20 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         conversation_id = str(body.get("conversation_id") or "").strip() or str(uuid.uuid4())
 
+        language = detect_language(question)
         ollama_error = ollama_problem()
         if ollama_error:
+            self._log_question(question, language, "error", 0, [], ollama_error)
             self._send_json(503, {"error": ollama_error})
             return
         if not bridge.ready:
-            self._send_json(503, {"error": bridge.error or "The MCP server is not available."})
+            reason = bridge.error or "The MCP server is not available."
+            self._log_question(question, language, "error", 0, [], reason)
+            self._send_json(503, {"error": reason})
             return
 
         with conversations_lock:
             history = list(conversations.get(conversation_id, []))
-        language = detect_language(question)
         started = time.perf_counter()
         try:
             result = run_turn(
@@ -272,9 +315,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                 bridge.call_tool,
             )
         except OllamaError as error:
+            elapsed = round(time.perf_counter() - started, 2)
+            self._log_question(question, language, "error", elapsed, [], str(error))
             self._send_json(503, {"error": str(error)})
             return
         elapsed = round(time.perf_counter() - started, 2)
+        outcome = classify_outcome(result.answer, any(trace.is_error for trace in result.traces))
+        self._log_question(question, result.language, outcome, elapsed, result.traces)
         remember(conversation_id, question, result.answer)
         self._send_json(
             200,
@@ -346,6 +393,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
             self.wfile.flush()
 
+        saved_ok = False
         try:
             values = result["values"]
             if result["needs_reindex"]:
@@ -354,16 +402,35 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if outcome.get("migrated"):
                     emit({"stage": "migrate", "message": f"Vector column is now {outcome['dimensions']} numbers."})
             saved = update_saved(values)
+            changes = "; ".join(
+                f"{change['label']}: {change['before']} -> {change['after']}" for change in result["changes"]
+            )
+            log_event(
+                "INFO",
+                "settings",
+                "apply",
+                version=saved["version"],
+                changes=changes,
+                reindex=bool(result["needs_reindex"]),
+            )
+            saved_ok = True
             with conversations_lock:
                 conversations.clear()
             emit({"stage": "mcp", "message": "Restarting the MCP server."})
-            bridge.restart()
+            try:
+                bridge.restart()
+            except RuntimeError as error:
+                log_event("ERROR", "mcp", "restart", outcome="error", reason="settings", error=str(error))
+                raise
+            log_event("INFO", "mcp", "restart", outcome="success", reason="settings")
             emit({
                 "stage": "done",
                 "message": f"Settings version {saved['version']} is active. The chat was reset.",
                 "version": saved["version"],
             })
         except Exception as error:  # noqa: BLE001 - the panel shows the failure, the process stays up
+            if not saved_ok:
+                log_event("ERROR", "settings", "apply", error=str(error))
             emit({"stage": "error", "message": str(error), "retry": True})
         finally:
             apply_lock.release()
@@ -376,8 +443,10 @@ class ChatHandler(BaseHTTPRequestHandler):
         try:
             bridge.restart()
         except RuntimeError as error:
+            log_event("ERROR", "mcp", "restart", outcome="error", reason="retry", error=str(error))
             self._send_json(503, {"ok": False, "error": str(error)})
             return
+        log_event("INFO", "mcp", "restart", outcome="success", reason="retry")
         self._send_json(200, {"ok": True, "tools": [tool["function"]["name"] for tool in bridge.tools]})
 
     def _shutdown(self) -> None:
@@ -390,19 +459,88 @@ class ChatHandler(BaseHTTPRequestHandler):
         threading.Timer(0.3, self.server.shutdown).start()
 
     def _health(self) -> dict:
-        return {
-            "ollama": ollama_problem(),
-            "mcp": None if bridge.ready else (bridge.error or "The MCP server is not available."),
-            "model": chat_model(),
+        ollama = ollama_problem()
+        mcp = None if bridge.ready else (bridge.error or "The MCP server is not available.")
+        log_event(
+            "INFO" if not ollama and not mcp else "WARNING",
+            "server",
+            "health",
+            ollama="ok" if not ollama else ollama,
+            mcp="ok" if not mcp else mcp,
+            model=chat_model(),
+        )
+        return {"ollama": ollama, "mcp": mcp, "model": chat_model()}
+
+    def _log_question(self, question: str, language: str, outcome: str, elapsed: float, traces, error: str = "") -> None:
+        settings = chat_settings()
+        details = {
+            "language": language,
+            "model": settings.get("chat_model", ""),
+            "settings_version": settings.get("version", ""),
+            "latency_s": elapsed,
+            "outcome": outcome,
+            "question": question,
+            "tools": [{"name": trace.name, "arguments": trace.arguments} for trace in traces],
         }
+        if error:
+            details["error"] = error
+        log_event("ERROR" if outcome == "error" else "INFO", "chat", "question", **details)
 
-    def _send_json(self, status: int, payload: dict) -> None:
+    def _logs(self, query: dict) -> None:
+        level = (query.get("level") or [""])[0].strip()
+        component = (query.get("component") or [""])[0].strip()
+        if level and level not in ("INFO", "WARNING", "ERROR"):
+            self._send_json(400, {"error": "Level must be INFO, WARNING or ERROR."})
+            return
+        try:
+            limit = int((query.get("limit") or ["200"])[0])
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 1000))
+        events = get_log().read_events(level or None, component or None, limit)
+        self._send_json(200, {"events": events}, no_store=True)
+
+    def _download_log(self) -> None:
+        body = get_log().read_text().encode("utf-8")
+        self._send(200, body, "text/plain; charset=utf-8", 'attachment; filename="events.txt"', no_store=True)
+
+    def _dashboard(self) -> None:
+        try:
+            report = snapshot()
+            document = render_html(report)
+        except Exception as error:  # noqa: BLE001 - the page shows a failure, the process stays up
+            log_event("ERROR", "dashboard", "build", error=str(error))
+            self._send_json(500, {"error": "The dashboard could not be built."})
+            return
+        self._send_json(200, {"generated_at": report["generated_at"], "html": document}, no_store=True)
+
+    def _dashboard_excel(self) -> None:
+        try:
+            report = snapshot()
+            blob = render_excel(report)
+        except Exception as error:  # noqa: BLE001
+            log_event("ERROR", "dashboard", "excel", error=str(error))
+            self._send_json(500, {"error": "The workbook could not be built."})
+            return
+        self._send(
+            200,
+            blob,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            'attachment; filename="factory-dashboard.xlsx"',
+            no_store=True,
+        )
+
+    def _send_json(self, status: int, payload: dict, no_store: bool = False) -> None:
         body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        self._send(status, body, "application/json; charset=utf-8")
+        self._send(status, body, "application/json; charset=utf-8", no_store=no_store)
 
-    def _send(self, status: int, body: bytes, content_type: str) -> None:
+    def _send(self, status: int, body: bytes, content_type: str, disposition: str | None = None, no_store: bool = False) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        if disposition:
+            self.send_header("Content-Disposition", disposition)
+        if no_store:
+            self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -430,8 +568,11 @@ def main() -> None:
     if bridge.ready:
         names = ", ".join(tool["function"]["name"] for tool in bridge.tools)
         print(f"MCP ready, tools: {names}", file=sys.stderr)
+        log_event("INFO", "mcp", "start", outcome="success", tools=names)
     else:
         print(bridge.error, file=sys.stderr)
+        log_event("ERROR", "mcp", "start", outcome="error", error=bridge.error or "not available")
+    log_event("INFO", "server", "start", host=HOST, port=PORT)
 
     try:
         httpd = ThreadingHTTPServer((HOST, PORT), ChatHandler)
@@ -445,6 +586,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopping.", file=sys.stderr)
     finally:
+        log_event("INFO", "server", "stop")
+        log_event("INFO", "mcp", "stop")
         httpd.server_close()
         bridge.close()
         remove_pid()

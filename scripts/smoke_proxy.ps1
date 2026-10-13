@@ -61,5 +61,62 @@ $logText = ""
 if (Test-Path $log) { $logText = Get-Content $log -Raw -ErrorAction SilentlyContinue }
 Check "NGINX wrote an access log line" ($logText -match "GET /") $log
 
+$protected = @(
+    "https://localhost:8443/logs",
+    "https://localhost:8443/dashboards",
+    "https://localhost:8443/api/logs",
+    "https://localhost:8443/api/logs/download",
+    "https://localhost:8443/api/dashboards",
+    "https://localhost:8443/api/dashboards/excel",
+    "http://127.0.0.1:7777/logs",
+    "http://127.0.0.1:7777/dashboards",
+    "http://127.0.0.1:7777/api/logs",
+    "http://127.0.0.1:7777/api/logs/download",
+    "http://127.0.0.1:7777/api/dashboards",
+    "http://127.0.0.1:7777/api/dashboards/excel"
+)
+foreach ($url in $protected) {
+    $code = curl.exe -k -sS -o NUL --max-time 20 -w "%{http_code}" $url
+    Check "Password required for $url" ($code -eq "401") "HTTP $code"
+}
+
+function Save-Authed([string]$Url, [string]$OutFile) {
+    curl.exe -k -sS --max-time 40 -u "${user}:${password}" -o $OutFile -w "%{http_code}" $Url
+}
+
+$logsPage = Save-Authed "https://localhost:8443/logs" "$env:TEMP\factory-logs.html"
+$logsHtml = Get-Content "$env:TEMP\factory-logs.html" -Raw -ErrorAction SilentlyContinue
+Check "Logs page opens with the password" ($logsPage -eq "200" -and $logsHtml -match "Logs") "HTTP $logsPage"
+
+$directLogsPage = Save-Authed "http://127.0.0.1:7777/dashboards" "$env:TEMP\factory-dash-page.html"
+$directLogsHtml = Get-Content "$env:TEMP\factory-dash-page.html" -Raw -ErrorAction SilentlyContinue
+Check "Direct dashboards page opens with the password" ($directLogsPage -eq "200" -and $directLogsHtml -match "Dashboards") "HTTP $directLogsPage"
+
+$logsApi = Save-Authed "https://localhost:8443/api/logs" "$env:TEMP\factory-logs.json"
+try { $logsJson = Get-Content "$env:TEMP\factory-logs.json" -Raw | ConvertFrom-Json } catch { $logsJson = $null }
+Check "Logs API works with the password" ($logsApi -eq "200" -and $null -ne $logsJson.events) "HTTP $logsApi"
+
+$directLogsApi = Save-Authed "http://127.0.0.1:7777/api/logs" "$env:TEMP\factory-logs-direct.json"
+try { $directLogsJson = Get-Content "$env:TEMP\factory-logs-direct.json" -Raw | ConvertFrom-Json } catch { $directLogsJson = $null }
+Check "Direct logs API works with the password" ($directLogsApi -eq "200" -and $null -ne $directLogsJson.events) "HTTP $directLogsApi"
+
+$download = Save-Authed "https://localhost:8443/api/logs/download" "$env:TEMP\factory-events.txt"
+Check "Log download works with the password" ($download -eq "200") "HTTP $download"
+
+$dash = Save-Authed "https://localhost:8443/api/dashboards" "$env:TEMP\factory-dash.json"
+try { $dashJson = Get-Content "$env:TEMP\factory-dash.json" -Raw | ConvertFrom-Json } catch { $dashJson = $null }
+$dashHtmlOk = $dashJson -and $dashJson.generated_at -and ($dashJson.html -match "<svg") -and ($dashJson.html -match "Generated at")
+Check "Dashboard API works with the password" ($dash -eq "200" -and $dashHtmlOk) "HTTP $dash"
+
+$directDash = Save-Authed "http://127.0.0.1:7777/api/dashboards" "$env:TEMP\factory-dash-direct.json"
+try { $directDashJson = Get-Content "$env:TEMP\factory-dash-direct.json" -Raw | ConvertFrom-Json } catch { $directDashJson = $null }
+Check "Direct dashboard API works with the password" ($directDash -eq "200" -and $directDashJson.generated_at) "HTTP $directDash"
+
+$excel = Save-Authed "https://localhost:8443/api/dashboards/excel" "$env:TEMP\factory-dash.xlsx"
+$excelBytes = @()
+if (Test-Path "$env:TEMP\factory-dash.xlsx") { $excelBytes = [System.IO.File]::ReadAllBytes("$env:TEMP\factory-dash.xlsx") }
+$isZip = $excelBytes.Length -gt 2 -and $excelBytes[0] -eq 80 -and $excelBytes[1] -eq 75
+Check "Dashboard Excel download works with the password" ($excel -eq "200" -and $isZip) "HTTP $excel"
+
 if ($failed) { exit 1 }
 Write-Host "Smoke test passed."

@@ -53,9 +53,41 @@
       overflow: auto;
       font: 13px/1.4 Consolas, monospace;
     }
+    #side {
+      width: 168px;
+      flex: none;
+      background: #f4f7fb;
+      border-right: 1px solid #d5dbe3;
+      padding: 16px 12px;
+      max-height: 100vh;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    #side.wide { width: min(640px, 48vw); }
+    #side .side-actions { display: flex; flex-direction: column; gap: 8px; }
+    #side.wide .side-actions { flex-direction: row; flex-wrap: wrap; }
+    #side-body iframe {
+      width: 100%;
+      height: calc(100vh - 150px);
+      border: 1px solid #d5dbe3;
+      background: #fff;
+      border-radius: 8px;
+      margin-top: 8px;
+    }
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .filters label { font-size: 13px; font-weight: 600; }
+    .filters select { font: inherit; margin-left: 4px; }
+    #event-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+    #event-table th, #event-table td { border-bottom: 1px solid #d5dbe3; padding: 4px; text-align: left; vertical-align: top; }
+    #event-table tr.ERROR td { background: #fde8e6; }
+    #event-table tr.WARNING td { background: #fff6dd; }
     #ask {
       position: fixed;
-      left: 0; bottom: 0;
+      left: 168px;
+      right: 0;
+      bottom: 0;
       background: #eef1f4;
       border-top: 1px solid #d5dbe3;
       padding: 12px 16px;
@@ -98,6 +130,13 @@
 </head>
 <body>
   <div class="layout">
+    <nav id="side">
+      <div class="side-actions">
+        <button type="button" id="open-dashboards" class="secondary">Dashboards</button>
+        <button type="button" id="open-logs" class="secondary">Logs</button>
+      </div>
+      <div id="side-body"></div>
+    </nav>
     <div class="chat">
       <main>
         <div class="top">
@@ -419,18 +458,194 @@
       }
     }
 
+    const side = document.getElementById("side");
+    const sideBody = document.getElementById("side-body");
+    const pagePath = location.pathname.replace(/\/$/, "") || "/";
+    const onDashboards = pagePath === "/dashboards";
+    const onLogs = pagePath === "/logs";
+
+    function placeAsk() {
+      ask.style.left = side.getBoundingClientRect().width + "px";
+      ask.style.right = admin.classList.contains("collapsed") ? "0" : "400px";
+    }
+
+    function downloadBlob(filename, blob) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    async function loadDashboard() {
+      sideBody.textContent = "Generating the dashboard...";
+      let data;
+      try {
+        const response = await fetch("/api/dashboards", {credentials: "same-origin"});
+        data = await response.json();
+        if (!response.ok) throw new Error(data.error || "The dashboard could not be built.");
+      } catch (error) {
+        sideBody.textContent = error.message || "The dashboard could not be built.";
+        return;
+      }
+      sideBody.textContent = "";
+      const tools = document.createElement("div");
+      tools.className = "actions";
+      const htmlButton = document.createElement("button");
+      htmlButton.type = "button";
+      htmlButton.textContent = "Download HTML";
+      htmlButton.addEventListener("click", () => {
+        downloadBlob("factory-dashboard.html", new Blob([data.html], {type: "text/html;charset=utf-8"}));
+      });
+      const excelButton = document.createElement("button");
+      excelButton.type = "button";
+      excelButton.className = "secondary";
+      excelButton.textContent = "Download Excel";
+      excelButton.addEventListener("click", () => { location.href = "/api/dashboards/excel"; });
+      tools.appendChild(htmlButton);
+      tools.appendChild(excelButton);
+      const frame = document.createElement("iframe");
+      frame.title = "Factory dashboard";
+      frame.srcdoc = data.html;
+      sideBody.appendChild(tools);
+      sideBody.appendChild(frame);
+    }
+
+    function detailText(event) {
+      const skip = {timestamp: true, level: true, component: true, event: true};
+      const parts = [];
+      for (const key of Object.keys(event)) {
+        if (!skip[key]) parts.push(key + "=" + event[key]);
+      }
+      return parts.join(" ");
+    }
+
+    async function loadLogs() {
+      const level = document.getElementById("log-level").value;
+      const component = document.getElementById("log-component").value;
+      const params = new URLSearchParams();
+      if (level) params.set("level", level);
+      if (component) params.set("component", component);
+      const table = document.getElementById("event-table").querySelector("tbody");
+      table.textContent = "";
+      const rowFor = (text) => {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 5;
+        cell.textContent = text;
+        row.appendChild(cell);
+        table.appendChild(row);
+      };
+      try {
+        const response = await fetch("/api/logs?" + params.toString(), {credentials: "same-origin"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "The log could not be read.");
+        const events = data.events || [];
+        if (!events.length) {
+          rowFor("No events.");
+          return;
+        }
+        for (const event of events) {
+          const row = document.createElement("tr");
+          row.className = event.level;
+          for (const value of [event.timestamp, event.level, event.component, event.event, detailText(event)]) {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.appendChild(cell);
+          }
+          table.appendChild(row);
+        }
+      } catch (error) {
+        rowFor(error.message || "The log could not be read.");
+      }
+    }
+
+    function showLogs() {
+      sideBody.textContent = "";
+      const filters = document.createElement("div");
+      filters.className = "filters";
+      function select(id, labelText, options) {
+        const label = document.createElement("label");
+        label.textContent = labelText;
+        const box = document.createElement("select");
+        box.id = id;
+        for (const option of options) {
+          const item = document.createElement("option");
+          item.value = option.value;
+          item.textContent = option.label;
+          box.appendChild(item);
+        }
+        label.appendChild(box);
+        filters.appendChild(label);
+        return box;
+      }
+      const level = select("log-level", "Level ", [
+        {value: "", label: "All levels"},
+        {value: "INFO", label: "INFO"},
+        {value: "WARNING", label: "WARNING"},
+        {value: "ERROR", label: "ERROR"},
+      ]);
+      const component = select("log-component", "Component ", [
+        {value: "", label: "All components"},
+        {value: "server", label: "server"},
+        {value: "chat", label: "chat"},
+        {value: "admin", label: "admin"},
+        {value: "settings", label: "settings"},
+        {value: "index", label: "index"},
+        {value: "ingest", label: "ingest"},
+        {value: "mcp", label: "mcp"},
+        {value: "dashboard", label: "dashboard"},
+      ]);
+      const downloadButton = document.createElement("button");
+      downloadButton.type = "button";
+      downloadButton.className = "secondary";
+      downloadButton.textContent = "Download";
+      downloadButton.addEventListener("click", () => { location.href = "/api/logs/download"; });
+      filters.appendChild(downloadButton);
+      const table = document.createElement("table");
+      table.id = "event-table";
+      const head = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      for (const title of ["Time", "Level", "Component", "Event", "Details"]) {
+        const cell = document.createElement("th");
+        cell.textContent = title;
+        headRow.appendChild(cell);
+      }
+      head.appendChild(headRow);
+      table.appendChild(head);
+      table.appendChild(document.createElement("tbody"));
+      sideBody.appendChild(filters);
+      sideBody.appendChild(table);
+      level.addEventListener("change", loadLogs);
+      component.addEventListener("change", loadLogs);
+      loadLogs();
+    }
+
+    document.getElementById("open-dashboards").addEventListener("click", () => {
+      if (onDashboards) loadDashboard();
+      else location.href = "/dashboards";
+    });
+    document.getElementById("open-logs").addEventListener("click", () => {
+      if (onLogs) showLogs();
+      else location.href = "/logs";
+    });
+
     const adminPage = location.pathname === "/admin" || location.pathname === "/admin/";
     const toggleAdmin = document.getElementById("toggle-admin");
     if (adminPage) {
-      document.getElementById("ask").style.right = "400px";
       toggleAdmin.textContent = "Back to chat";
       toggleAdmin.addEventListener("click", () => { location.href = "/"; });
       loadSettings();
     } else {
       admin.classList.add("collapsed");
-      document.getElementById("ask").style.right = "0";
       toggleAdmin.addEventListener("click", () => { location.href = "/admin"; });
     }
+    if (onDashboards || onLogs) side.classList.add("wide");
+    if (onDashboards) loadDashboard();
+    if (onLogs) showLogs();
+    placeAsk();
+    window.addEventListener("resize", placeAsk);
 
     document.getElementById("apply").addEventListener("click", () => preview(readForm()));
     document.getElementById("reset").addEventListener("click", () => {
