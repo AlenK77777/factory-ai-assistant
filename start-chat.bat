@@ -14,12 +14,15 @@ if exist "%ProgramFiles%\Docker\Docker\resources\bin" set "PATH=%ProgramFiles%\D
 if not exist "%ROOT%\logs" mkdir "%ROOT%\logs"
 call :shortcuts
 
-call :health
+call :https
 if not errorlevel 1 (
-  echo The chat is already running. Opening the browser.
-  start "" "http://127.0.0.1:7777/"
-  ping -n 4 127.0.0.1 >nul
-  exit /b 0
+  call :health
+  if not errorlevel 1 (
+    echo The chat is already running. Opening the browser.
+    start "" "https://localhost:8443/"
+    ping -n 4 127.0.0.1 >nul
+    exit /b 0
+  )
 )
 
 echo Checking Docker Desktop...
@@ -46,6 +49,12 @@ if not exist "%PY%" (
   goto failed
 )
 
+call :health
+if not errorlevel 1 (
+  echo The chat server is already running.
+  goto certs
+)
+
 echo Starting the chat server.
 echo Log: %LOG%
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; $p = Start-Process -FilePath '%PY%' -ArgumentList '-u','chat\server.py' -WorkingDirectory '%ROOT%' -WindowStyle Hidden -RedirectStandardOutput '%LOG%' -RedirectStandardError '%ERRLOG%' -PassThru; Set-Content -Path '%ROOT%\logs\chat.pid' -Value $p.Id -Encoding ascii"
@@ -54,11 +63,32 @@ if errorlevel 1 (
   goto failed
 )
 
+:certs
+
+echo Preparing the HTTPS certificate and the admin password...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\generate_certs.ps1"
+if errorlevel 1 (
+  echo Could not create the certificate or the admin password file.
+  goto failed
+)
+
+if not exist "%ROOT%\logs\nginx" mkdir "%ROOT%\logs\nginx"
+call :port_free 8088
+if errorlevel 1 goto failed
+call :port_free 8443
+if errorlevel 1 goto failed
+echo Starting NGINX...
+docker compose up -d nginx
+if errorlevel 1 (
+  echo docker compose up -d nginx failed.
+  goto failed
+)
+
 echo Waiting for http://127.0.0.1:7777 ...
 set /a N=0
 :wait_chat
 call :health
-if not errorlevel 1 goto open_browser
+if not errorlevel 1 goto wait_https
 set /a N+=1
 if !N! GEQ 45 (
   echo The chat server did not respond within 45 seconds.
@@ -67,9 +97,25 @@ if !N! GEQ 45 (
 ping -n 2 127.0.0.1 >nul
 goto wait_chat
 
+:wait_https
+echo Waiting for https://localhost:8443 ...
+set /a N=0
+:https_loop
+call :https
+if not errorlevel 1 goto open_browser
+set /a N+=1
+if !N! GEQ 20 (
+  echo NGINX did not respond on https://localhost:8443 within 40 seconds.
+  echo Check: docker compose logs nginx
+  goto failed
+)
+ping -n 3 127.0.0.1 >nul
+goto https_loop
+
 :open_browser
-echo Chat is ready. Opening the browser.
-start "" "http://127.0.0.1:7777/"
+echo Chat is ready. Opening https://localhost:8443
+echo Port 7777 still answers directly, for debugging.
+start "" "https://localhost:8443/"
 ping -n 4 127.0.0.1 >nul
 exit /b 0
 
@@ -79,9 +125,18 @@ echo Something went wrong. The window will stay open.
 echo Log files:
 echo   %LOG%
 echo   %ERRLOG%
+echo   %ROOT%\logs\nginx\error.log
 echo.
 pause
 exit /b 1
+
+:port_free
+powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort %~1 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if (-not $c) { exit 0 }; $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; $name = if ($p) { $p.ProcessName } else { 'unknown' }; Write-Host ('Port {0} is already in use by {1} (PID {2}).' -f %~1, $name, $c.OwningProcess); Write-Host ('NGINX needs 127.0.0.1:{0}. Stop that program, then run start-chat.bat again.' -f %~1); exit 1"
+exit /b !ERRORLEVEL!
+
+:https
+curl.exe -k -s --max-time 5 -o NUL "https://localhost:8443/api/health"
+exit /b !ERRORLEVEL!
 
 :health
 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:7777/api/health' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }"

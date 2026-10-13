@@ -331,6 +331,7 @@
       document.getElementById("review").style.display = "none";
       const response = await fetch("/api/settings/preview", {
         method: "POST",
+        credentials: "same-origin",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({values}),
       });
@@ -360,6 +361,7 @@
       document.getElementById("progress").textContent = "";
       const response = await fetch("/api/settings/apply", {
         method: "POST",
+        credentials: "same-origin",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({values: pendingValues, confirm_reindex: confirmReindex}),
       });
@@ -401,7 +403,7 @@
     }
 
     async function loadSettings() {
-      const response = await fetch("/api/settings");
+      const response = await fetch("/api/settings", {credentials: "same-origin"});
       spec = await response.json();
       buildForm();
     }
@@ -417,11 +419,18 @@
       }
     }
 
-    document.getElementById("toggle-admin").addEventListener("click", () => {
-      const hidden = admin.classList.toggle("collapsed");
-      document.getElementById("ask").style.right = hidden ? "0" : "400px";
-    });
-    document.getElementById("ask").style.right = "400px";
+    const adminPage = location.pathname === "/admin" || location.pathname === "/admin/";
+    const toggleAdmin = document.getElementById("toggle-admin");
+    if (adminPage) {
+      document.getElementById("ask").style.right = "400px";
+      toggleAdmin.textContent = "Back to chat";
+      toggleAdmin.addEventListener("click", () => { location.href = "/"; });
+      loadSettings();
+    } else {
+      admin.classList.add("collapsed");
+      document.getElementById("ask").style.right = "0";
+      toggleAdmin.addEventListener("click", () => { location.href = "/admin"; });
+    }
 
     document.getElementById("apply").addEventListener("click", () => preview(readForm()));
     document.getElementById("reset").addEventListener("click", () => {
@@ -469,7 +478,6 @@
     });
 
     checkHealth();
-    loadSettings();
   </script>
 </body>
 </html>

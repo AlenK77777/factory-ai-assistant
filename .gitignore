@@ -14,8 +14,12 @@ data/rejected_rows.csv
 data/chat_settings.json
 data/chat_settings.json.tmp
 
-# Chat server log and process id
+# Chat server log and process id, and NGINX logs
 logs/
+
+# Local HTTPS certificate and the admin password file
+nginx/certs/
+nginx/auth/
 
 # Excel lock files created while a workbook is open
 ~$*.xlsx

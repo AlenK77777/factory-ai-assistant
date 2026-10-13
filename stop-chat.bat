@@ -42,6 +42,14 @@ if exist "%PIDFILE%" del "%PIDFILE%" >nul 2>&1
 :after_chat
 if not defined STOPPED echo The chat server was not running.
 
+echo Stopping NGINX...
+docker compose stop nginx
+if errorlevel 1 (
+  echo Could not stop NGINX. It may not be running.
+) else (
+  echo Stopped NGINX.
+)
+
 if /I "%~1"=="all" (
   echo Stopping the database container...
   docker compose stop db

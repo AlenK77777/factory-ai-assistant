@@ -31,20 +31,18 @@ flowchart LR
     CLIENT[Cursor / Claude Desktop] <--> MCP[MCP server<br/>Python, stdio]
     MCP -->|read-only role| DB
     LOCAL[rag/ask_local.py<br/>local model via Ollama] --> DB
-    EMP[Browser :7777] --> CHAT[chat/server.py<br/>MCP client]
+    EMP[Browser :8443] --> NGINX[NGINX<br/>127.0.0.1 only]
+    NGINX -->|host.docker.internal| CHAT[chat/server.py<br/>127.0.0.1:7777]
     CHAT <--> MCP
     CHAT -->|tool calling| OLLAMA[Ollama]
-    USER[Browser] --> NGINX[NGINX port 8080] --> DASH[Streamlit dashboard<br/>Docker]
-    DASH --> DB
 ```
 
 | Component | Where it runs | Port |
 |---|---|---|
 | PostgreSQL 16 + pgvector | Docker (`pgvector/pgvector:pg16`) | 5432 |
-| Streamlit dashboard | Docker | 8501 (internal only) |
-| NGINX reverse proxy | Docker | 8080 → dashboard |
+| NGINX reverse proxy (`nginx:1.28.0-alpine`) | Docker | 127.0.0.1:8088 (HTTP) and 127.0.0.1:8443 (HTTPS) → chat |
 | MCP server | Windows, Python venv, stdio | none |
-| Employee chat | Windows, Python venv | 7777 (127.0.0.1 only) |
+| Employee chat | Windows, Python venv | 7777 (127.0.0.1 only, for debugging) |
 | Ollama (`qwen3-embedding:0.6b` + `qwen3:8b`) | Windows, native | 11434 |
 
 ## Design principles
@@ -67,6 +65,8 @@ factory-ai-assistant/
 ├── requirements.txt
 ├── db/init/01_schema.sql
 ├── scripts/generate_data.py
+├── scripts/generate_certs.ps1   # local HTTPS certificate and admin password file
+├── scripts/smoke_proxy.ps1      # checks the NGINX proxy
 ├── ingest/load_excel.py
 ├── mcp_server/server.py
 ├── chat/server.py            # employee web chat (MCP client)
@@ -189,17 +189,25 @@ Acceptance criteria:
 - [ ] An off-topic question says that nothing relevant was found.
 - [ ] "How I got this" shows the tool, its arguments, the JSON result, and the model and time.
 
-## Step 5: KPI dashboard behind NGINX (Thursday)
+## Step 5: NGINX in front of the chat (dashboard later)
 
-- `dashboard/app.py` (Streamlit) + `dashboard/Dockerfile`: orders by status, late orders table, defects by station and by type, weekly defect trend, last ingestion runs.
-- `nginx/nginx.conf`: reverse proxy from port 8080 to the dashboard container, including the WebSocket upgrade headers that Streamlit needs.
-- Add `dashboard` and `nginx` services to `docker-compose.yml`. The dashboard port is not published directly, only through NGINX.
+NGINX (`nginx:1.28.0-alpine`) publishes only `127.0.0.1:8088` and `127.0.0.1:8443`. HTTP redirects to HTTPS. The certificate is self-signed (`scripts/generate_certs.ps1`) and is not committed. NGINX proxies to the chat on the Windows host (`host.docker.internal:7777`). The employee chat is open. `/admin` and the settings API ask for a password (basic auth; the password is `ADMIN_PASSWORD` in `.env`). The chat app checks that same password, so http://127.0.0.1:7777/admin is not a way around NGINX.
+
+Double-click `start-chat.bat`. It opens https://localhost:8443. http://127.0.0.1:7777 still works for debugging. `stop-chat.bat` stops the chat and NGINX. `stop-chat.bat all` also stops the database container.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\smoke_proxy.ps1
+```
+
+The KPI dashboard (Streamlit) is not built yet. When it is added, it can sit behind this same proxy.
 
 Acceptance criteria:
 
-- [ ] `docker compose up -d` starts db, dashboard and nginx.
-- [ ] http://localhost:8080 shows the dashboard with live data.
-- [ ] After a new Excel file is loaded, the dashboard shows the change after a refresh.
+- [ ] http://127.0.0.1:8088 redirects to https://localhost:8443.
+- [ ] https://localhost:8443 shows the chat, and a question is answered through the proxy.
+- [ ] https://localhost:8443/admin asks for the admin password. Without it, `/api/settings` returns 401.
+- [ ] http://127.0.0.1:7777 still opens the chat directly.
+- [ ] `logs/nginx/access.log` records the requests.
 
 ## Step 6: CI with GitHub Actions (Friday)
 

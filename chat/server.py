@@ -26,6 +26,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 
+from chat.admin_auth import basic_auth_matches  # noqa: E402
 from chat.loop import run_turn  # noqa: E402
 from chat.mcp_bridge import McpBridge  # noqa: E402
 from chat.settings import field_specs, load_settings, review, reindex_confirmation_error, update_saved  # noqa: E402
@@ -164,8 +165,40 @@ def read_body(handler: BaseHTTPRequestHandler) -> dict:
 class ChatHandler(BaseHTTPRequestHandler):
     server_version = "factory-chat/1.0"
 
+    def _admin_required(self) -> bool:
+        """True for the admin page and the settings API. The employee chat is not included."""
+        path = self.path.split("?")[0]
+        if path in ("/admin", "/admin/"):
+            return True
+        return path == "/api/settings" or path.startswith("/api/settings/") or path.startswith("/api/mcp/")
+
+    def _reject_admin(self) -> None:
+        body = b'{"error":"Admin password required."}'
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Factory admin"')
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _allow_admin(self) -> bool:
+        """False when this request was rejected. The employee chat never calls this."""
+        if not self._admin_required():
+            return True
+        user = os.getenv("ADMIN_USER", "admin")
+        password = os.getenv("ADMIN_PASSWORD", "")
+        if not password or password == "change-me-admin":
+            self._send_json(503, {"error": "Set ADMIN_PASSWORD in .env, then run scripts\\generate_certs.ps1."})
+            return False
+        if basic_auth_matches(self.headers.get("Authorization"), user, password):
+            return True
+        self._reject_admin()
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
-        if self.path in ("/", "/index.html"):
+        if not self._allow_admin():
+            return
+        if self.path.split("?")[0] in ("/", "/index.html", "/admin", "/admin/"):
             self._send(200, STATIC_PAGE.read_bytes(), "text/html; charset=utf-8")
             return
         if self.path == "/api/health":
@@ -187,6 +220,8 @@ class ChatHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "That page does not exist."})
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._allow_admin():
+            return
         if self.path == "/api/shutdown":
             self._shutdown()
             return
