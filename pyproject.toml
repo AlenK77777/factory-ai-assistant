@@ -1,0 +1,7 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# Pyflakes plus pycodestyle errors. Line length is not included.
+select = ["E4", "E7", "E9", "F"]

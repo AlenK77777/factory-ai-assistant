@@ -9,7 +9,7 @@ import pathlib
 import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-import crypt
+import crypt  # noqa: E402  # filter the deprecation warning before this import
 
 password = pathlib.Path("/tmp/password").read_text(encoding="utf-8")
 username = os.environ["ADMIN_USER"]

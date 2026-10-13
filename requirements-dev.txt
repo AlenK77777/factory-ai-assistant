@@ -1,0 +1,2 @@
+# Tools for local checks and GitHub Actions. Not needed to run the assistant.
+ruff>=0.6

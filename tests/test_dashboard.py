@@ -1,5 +1,6 @@
 """Dashboard numbers, the offline HTML page and the Excel workbook. No live model."""
 
+import pytest
 import zipfile
 from datetime import date, datetime, timezone
 from io import BytesIO
@@ -238,10 +239,9 @@ def test_excel_chart_xml_keeps_axes_and_text_categories():
                 assert category.find("c:numRef", CHART_NS) is None
 
 
+@pytest.mark.integration
 def test_live_database_report_when_available():
-    """Uses the read-only role when the database is up. Skips otherwise."""
-    import pytest
-
+    """Uses the read-only role when the database is up. Skipped in CI."""
     from dashboard.data import fetch_production
 
     report = fetch_production()
