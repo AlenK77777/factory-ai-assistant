@@ -106,6 +106,7 @@
         </div>
         <p class="note">Ask about an order, defects, or a work instruction. English, Russian or Hebrew. Synthetic data.</p>
         <div id="banner"></div>
+        <button type="button" id="retry-banner" class="secondary" style="display:none; margin-bottom:12px">Retry</button>
         <div id="log"></div>
       </main>
       <form id="ask">
@@ -121,6 +122,7 @@
       <p class="help">These settings change the assistant on this computer. Passwords stay in .env and are not shown or edited here.</p>
       <p id="version-line" class="help"></p>
       <div id="settings-errors" class="errors"></div>
+      <button type="button" id="retry-mcp" class="secondary" style="display:none; margin-bottom:12px">Retry</button>
       <div id="settings-warnings" class="warnings"></div>
       <form id="settings-form"></form>
       <div class="actions">
@@ -156,9 +158,26 @@
     let spec = null;
     let pendingValues = null;
 
-    function showBanner(text) {
-      banner.style.display = "block";
-      banner.textContent = text;
+    function showBanner(text, canRetry) {
+      banner.style.display = text ? "block" : "none";
+      banner.textContent = text || "";
+      document.getElementById("retry-banner").style.display = canRetry ? "inline-block" : "none";
+    }
+
+    async function retryMcp() {
+      const response = await fetch("/api/mcp/restart", {method: "POST"});
+      const data = await response.json();
+      if (data.ok) {
+        showBanner("");
+        showNotes("settings-errors", []);
+        document.getElementById("retry-mcp").style.display = "none";
+        document.getElementById("progress").textContent += "MCP server restarted. You can ask a question.\n";
+        return;
+      }
+      const reason = data.error || "The MCP server did not restart.";
+      showBanner(reason, true);
+      showNotes("settings-errors", [reason]);
+      document.getElementById("retry-mcp").style.display = "inline-block";
     }
 
     function addMessage(role, text, meta) {
@@ -370,7 +389,11 @@
             resetConversation();
             await loadSettings();
           }
-          if (event.stage === "error") showNotes("settings-errors", [event.message]);
+          if (event.stage === "error") {
+            showNotes("settings-errors", [event.message]);
+            document.getElementById("retry-mcp").style.display = event.retry ? "inline-block" : "none";
+            showBanner(event.message, Boolean(event.retry));
+          }
         }
       }
       document.getElementById("apply").disabled = false;
@@ -386,8 +409,9 @@
     async function checkHealth() {
       try {
         const health = await (await fetch("/api/health")).json();
-        if (health.ollama) showBanner(health.ollama);
-        else if (health.mcp) showBanner(health.mcp);
+        if (health.ollama) showBanner(health.ollama, false);
+        else if (health.mcp) showBanner(health.mcp, true);
+        else showBanner("");
       } catch (error) {
         showBanner("The chat server did not respond.");
       }
@@ -407,6 +431,8 @@
       preview(defaults);
     });
     document.getElementById("confirm").addEventListener("click", applySettings);
+    document.getElementById("retry-mcp").addEventListener("click", retryMcp);
+    document.getElementById("retry-banner").addEventListener("click", retryMcp);
 
     ask.addEventListener("submit", async (event) => {
       event.preventDefault();

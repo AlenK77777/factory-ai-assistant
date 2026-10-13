@@ -36,6 +36,7 @@ from rag.language import detect_language  # noqa: E402
 HOST = "127.0.0.1"
 PORT = 7777
 STATIC_PAGE = Path(__file__).resolve().parent / "static" / "index.html"
+PID_FILE = ROOT / "logs" / "chat.pid"
 
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 bridge = McpBridge()
@@ -186,11 +187,17 @@ class ChatHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "That page does not exist."})
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/api/shutdown":
+            self._shutdown()
+            return
         if self.path == "/api/settings/preview":
             self._preview()
             return
         if self.path == "/api/settings/apply":
             self._apply()
+            return
+        if self.path == "/api/mcp/restart":
+            self._restart_mcp()
             return
         if self.path != "/api/chat":
             self._send_json(404, {"error": "That page does not exist."})
@@ -316,11 +323,36 @@ class ChatHandler(BaseHTTPRequestHandler):
                 conversations.clear()
             emit({"stage": "mcp", "message": "Restarting the MCP server."})
             bridge.restart()
-            emit({"stage": "done", "message": f"Settings version {saved['version']} is active. The chat was reset.", "version": saved["version"]})
+            emit({
+                "stage": "done",
+                "message": f"Settings version {saved['version']} is active. The chat was reset.",
+                "version": saved["version"],
+            })
         except Exception as error:  # noqa: BLE001 - the panel shows the failure, the process stays up
-            emit({"stage": "error", "message": str(error)})
+            emit({"stage": "error", "message": str(error), "retry": True})
         finally:
             apply_lock.release()
+
+    def _restart_mcp(self) -> None:
+        """Try the MCP connection again. Used by the Retry button after Apply."""
+        if self.client_address[0] not in ("127.0.0.1", "::1"):
+            self._send_json(403, {"error": "Retry is only allowed from this computer."})
+            return
+        try:
+            bridge.restart()
+        except RuntimeError as error:
+            self._send_json(503, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, {"ok": True, "tools": [tool["function"]["name"] for tool in bridge.tools]})
+
+    def _shutdown(self) -> None:
+        """Stop this process. stop-chat.bat calls this from the same computer."""
+        if self.client_address[0] not in ("127.0.0.1", "::1"):
+            self._send_json(403, {"error": "Shutdown is only allowed from this computer."})
+            return
+        self._send_json(200, {"ok": True, "message": "Stopping the chat server."})
+        # Let this response finish, then stop serve_forever from another thread.
+        threading.Timer(0.3, self.server.shutdown).start()
 
     def _health(self) -> dict:
         return {
@@ -344,6 +376,19 @@ class ChatHandler(BaseHTTPRequestHandler):
         print(f"[chat] {self.address_string()} {fmt % args}", file=sys.stderr)
 
 
+def write_pid() -> None:
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()), encoding="ascii")
+
+
+def remove_pid() -> None:
+    try:
+        if PID_FILE.exists() and PID_FILE.read_text(encoding="ascii").strip() == str(os.getpid()):
+            PID_FILE.unlink()
+    except OSError:
+        pass
+
+
 def main() -> None:
     print("Starting the factory-db MCP server...", file=sys.stderr)
     bridge.start()
@@ -357,8 +402,9 @@ def main() -> None:
         httpd = ThreadingHTTPServer((HOST, PORT), ChatHandler)
     except OSError as error:
         sys.exit(f"Cannot listen on {HOST}:{PORT} ({error}). Is the chat already running?")
+    write_pid()
     print(f"Chat is at http://{HOST}:{PORT}", flush=True)
-    print("Stop it with Ctrl+C in this window.", flush=True)
+    print("Stop it with stop-chat.bat or Ctrl+C in this window.", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -366,6 +412,7 @@ def main() -> None:
     finally:
         httpd.server_close()
         bridge.close()
+        remove_pid()
 
 
 if __name__ == "__main__":

@@ -14,5 +14,8 @@ data/rejected_rows.csv
 data/chat_settings.json
 data/chat_settings.json.tmp
 
+# Chat server log and process id
+logs/
+
 # Excel lock files created while a workbook is open
 ~$*.xlsx
