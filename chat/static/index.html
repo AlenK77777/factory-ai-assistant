@@ -66,8 +66,7 @@
       gap: 8px;
     }
     #side.wide { width: min(640px, 48vw); }
-    #side .side-actions { display: flex; flex-direction: column; gap: 8px; }
-    #side.wide .side-actions { flex-direction: row; flex-wrap: wrap; }
+    #side .side-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
     #side-body iframe {
       width: 100%;
       height: calc(100vh - 150px);
@@ -95,8 +94,7 @@
     .row { max-width: 740px; margin: 0 auto; display: flex; gap: 8px; }
     textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 140px; font: inherit; padding: 8px; border: 1px solid #b7c0cb; border-radius: 8px; }
     button { font: inherit; background: #1f4e79; color: #fff; border: 0; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
-    button.secondary { background: #5c6b7a; }
-    button:disabled { opacity: 0.6; cursor: default; }
+    button:disabled { background: #9aa6b2; color: #eef1f4; cursor: not-allowed; }
     aside {
       width: 400px;
       background: #fff8e8;
@@ -133,8 +131,10 @@
   <div class="layout">
     <nav id="side">
       <div class="side-actions">
-        <button type="button" id="open-dashboards" class="secondary">Dashboards</button>
-        <button type="button" id="open-logs" class="secondary">Logs</button>
+        <button type="button" id="back-to-chat" hidden>Back to chat</button>
+        <button type="button" id="open-admin">Admin</button>
+        <button type="button" id="open-dashboards">Dashboards</button>
+        <button type="button" id="open-logs">Logs</button>
       </div>
       <div id="side-body"></div>
     </nav>
@@ -142,11 +142,10 @@
       <main>
         <div class="top">
           <h1>Factory assistant</h1>
-          <button type="button" id="toggle-admin" class="secondary">Admin panel</button>
         </div>
         <p class="note">Ask about an order, defects, or a work instruction. English, Russian or Hebrew. Synthetic data.</p>
         <div id="banner"></div>
-        <button type="button" id="retry-banner" class="secondary" style="display:none; margin-bottom:12px">Retry</button>
+        <button type="button" id="retry-banner" style="display:none; margin-bottom:12px">Retry</button>
         <div id="log"></div>
       </main>
       <form id="ask">
@@ -162,13 +161,13 @@
       <p class="help">These settings change the assistant on this computer. Passwords stay in .env and are not shown or edited here.</p>
       <p id="version-line" class="help"></p>
       <div id="settings-errors" class="errors"></div>
-      <button type="button" id="retry-mcp" class="secondary" style="display:none; margin-bottom:12px">Retry</button>
+      <button type="button" id="retry-mcp" style="display:none; margin-bottom:12px">Retry</button>
       <div id="settings-warnings" class="warnings"></div>
       <form id="settings-form"></form>
       <div class="actions">
         <button type="button" id="apply">Apply</button>
-        <button type="button" id="rollback" class="secondary">Rollback</button>
-        <button type="button" id="reset" class="secondary">Reset to defaults</button>
+        <button type="button" id="rollback">Rollback</button>
+        <button type="button" id="reset">Reset to defaults</button>
       </div>
       <div id="review">
         <h3>What will change</h3>
@@ -520,7 +519,6 @@
       });
       const excelButton = document.createElement("button");
       excelButton.type = "button";
-      excelButton.className = "secondary";
       excelButton.textContent = "Download Excel";
       excelButton.addEventListener("click", () => { location.href = "/api/dashboards/excel" + query; });
       tools.appendChild(htmlButton);
@@ -621,7 +619,6 @@
       ]);
       const downloadButton = document.createElement("button");
       downloadButton.type = "button";
-      downloadButton.className = "secondary";
       downloadButton.textContent = "Download";
       downloadButton.addEventListener("click", () => { location.href = "/api/logs/download"; });
       filters.appendChild(downloadButton);
@@ -654,14 +651,15 @@
     });
 
     const adminPage = location.pathname === "/admin" || location.pathname === "/admin/";
-    const toggleAdmin = document.getElementById("toggle-admin");
+    document.getElementById("open-admin").addEventListener("click", () => {
+      if (!adminPage) location.href = "/admin";
+    });
+    document.getElementById("back-to-chat").hidden = !(adminPage || onDashboards || onLogs);
+    document.getElementById("back-to-chat").addEventListener("click", () => { location.href = "/"; });
     if (adminPage) {
-      toggleAdmin.textContent = "Back to chat";
-      toggleAdmin.addEventListener("click", () => { location.href = "/"; });
       loadSettings();
     } else {
       admin.classList.add("collapsed");
-      toggleAdmin.addEventListener("click", () => { location.href = "/admin"; });
     }
     if (onDashboards || onLogs) side.classList.add("wide");
     if (onDashboards) loadDashboard();
