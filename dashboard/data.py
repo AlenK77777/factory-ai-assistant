@@ -98,6 +98,18 @@ def production_report(orders: list[dict], defects: list[dict], runs: list[dict],
         bucket = weeks.setdefault(label, {"week": label, "count": 0, "units": 0})
         bucket["count"] += 1
         bucket["units"] += int(row.get("quantity") or 0)
+    weekly = [weeks[key] for key in sorted(weeks)]
+    # The first week in the data starts mid-week. The week that contains today is not finished.
+    current_year, current_week, _day = today.isocalendar()
+    current_label = f"{current_year}-W{current_week:02d}"
+    partial = set()
+    if weekly:
+        partial.add(weekly[0]["week"])
+    if current_label in weeks:
+        partial.add(current_label)
+    for bucket in weekly:
+        bucket["partial"] = bucket["week"] in partial
+        bucket["label"] = bucket["week"] + (" partial" if bucket["partial"] else "")
     rate = round(100.0 * defective_units / ordered_units, 1) if ordered_units else 0.0
     ingest = []
     for row in runs:
@@ -126,7 +138,7 @@ def production_report(orders: list[dict], defects: list[dict], runs: list[dict],
         "defects_by_station": _units_by(defects, "station"),
         "defects_by_type": _units_by(defects, "defect_type"),
         "defects_by_sector": _units_by(defects, "customer_sector"),
-        "weekly_defects": [weeks[key] for key in sorted(weeks)],
+        "weekly_defects": weekly,
         "late_orders": late_rows[:10],
         "ingest_runs": ingest,
     }

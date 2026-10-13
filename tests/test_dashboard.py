@@ -1,7 +1,9 @@
 """Dashboard numbers, the offline HTML page and the Excel workbook. No live model."""
 
+import zipfile
 from datetime import date, datetime, timezone
 from io import BytesIO
+from xml.etree import ElementTree as ET
 
 from openpyxl import load_workbook
 from openpyxl.chart import BarChart, LineChart
@@ -54,6 +56,9 @@ def test_production_kpis_late_orders_and_weeks():
     assert report["defects_by_sector"][0]["name"] == "Medical"
     assert len(report["weekly_defects"]) == 2
     assert report["weekly_defects"][0]["week"] < report["weekly_defects"][1]["week"]
+    assert report["weekly_defects"][0]["partial"] is True
+    assert report["weekly_defects"][0]["label"].endswith(" partial")
+    assert report["weekly_defects"][1]["partial"] is False
     assert report["ingest_runs"][0]["rows_rejected"] == 2
     assert report["ingest_runs"][0]["file_name"] == "defects.xlsx"
 
@@ -136,6 +141,9 @@ def test_html_is_self_contained_svg():
     assert "Total orders" in document
     assert ">3<" in document
     assert "PO-1" in document
+    assert " partial" in document
+    assert "Station" in document
+    assert "Defective units" in document
     assert "No data." in document
 
 
@@ -170,7 +178,9 @@ def test_excel_has_a_sheet_per_section_and_native_charts():
         "Unanswered",
     ):
         assert name in workbook.sheetnames
-    assert workbook["Overview"]["B1"].value == "2026-10-13T15:00:00+03:00"
+    assert workbook["Overview"]["B1"].value == datetime(2026, 10, 13, 15, 0)
+    assert workbook["Overview"]["B12"].value == "=IF(B11=0,0,B10/B11)"
+    assert workbook["Overview"]["B12"].number_format == "0.0%"
     assert workbook["Overview"]["B2"].value == "no"
     assert workbook["Outcomes"]["A2"].value == "found an answer (correctness not checked)"
     orders = workbook["Orders by status"]
@@ -190,6 +200,42 @@ def test_excel_has_a_sheet_per_section_and_native_charts():
     assert workbook["Late orders"]._charts == []
     assert workbook["Unanswered"]["D2"].value == "weather"
     assert workbook["Ingest runs"]["D2"].value == 2
+    assert isinstance(workbook["Late orders"]["D2"].value, date)
+    assert isinstance(workbook["Ingest runs"]["B2"].value, datetime)
+    assert isinstance(workbook["Questions per day"]["A2"].value, date)
+
+
+CHART_NS = {"c": "http://schemas.openxmlformats.org/drawingml/2006/chart"}
+
+
+def test_excel_chart_xml_keeps_axes_and_text_categories():
+    report = {
+        "generated_at": "2026-10-13T15:00:00+03:00",
+        "production": sample_production(),
+        "ai": {
+            "questions_per_day": [{"day": "2026-10-13", "count": 2}],
+            "by_language": [{"name": "en", "count": 2}],
+            "outcomes": {"found": 1, "not_found": 1, "error": 0},
+            "tools": [{"name": "get_order_status", "count": 1}],
+            "latency_by_model": [{"model": "qwen3:14b", "count": 2, "median_s": 2.5, "slowest_s": 3.5}],
+            "unanswered": [],
+        },
+    }
+    blob = render_excel(report)
+    with zipfile.ZipFile(BytesIO(blob)) as book:
+        names = [name for name in book.namelist() if name.startswith("xl/charts/chart")]
+        assert names
+        for name in names:
+            root = ET.fromstring(book.read(name))
+            axes = root.findall(".//c:catAx", CHART_NS) + root.findall(".//c:valAx", CHART_NS)
+            assert axes
+            for axis in axes:
+                deleted = axis.find("c:delete", CHART_NS)
+                assert deleted is None or deleted.get("val") in ("0", "false")
+                assert axis.find("c:title", CHART_NS) is not None
+            for category in root.findall(".//c:cat", CHART_NS):
+                assert category.find("c:strRef", CHART_NS) is not None
+                assert category.find("c:numRef", CHART_NS) is None
 
 
 def test_live_database_report_when_available():
