@@ -17,7 +17,7 @@ import psycopg
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
-from chat.event_log import get_log, log_event
+from chat.event_log import event_source, get_log, log_event
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -177,9 +177,16 @@ def _tools_of(event: dict) -> list[dict]:
     return parsed if isinstance(parsed, list) else []
 
 
-def ai_report(events: list[dict]) -> dict:
-    """Assistant section. Only chat question events count."""
+def ai_report(events: list[dict], include_test: bool = False) -> dict:
+    """Assistant section. Only chat question events count.
+
+    By default only source=user is counted. Smoke, test, and legacy lines
+    (events written before source existed) are left out unless include_test is set.
+    source is a label for statistics, not a security control.
+    """
     questions = [event for event in events if event.get("component") == "chat" and event.get("event") == "question"]
+    if not include_test:
+        questions = [event for event in questions if event_source(event) == "user"]
     per_day: dict[str, int] = defaultdict(int)
     per_language: dict[str, int] = defaultdict(int)
     outcomes = {"found": 0, "not_found": 0, "error": 0}
@@ -238,5 +245,5 @@ def ai_report(events: list[dict]) -> dict:
     }
 
 
-def load_ai_report() -> dict:
-    return ai_report(get_log().read_events())
+def load_ai_report(include_test: bool = False) -> dict:
+    return ai_report(get_log().read_events(), include_test=include_test)

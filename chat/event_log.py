@@ -13,6 +13,7 @@ The file rotates by size so it cannot grow without a limit.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from datetime import datetime
@@ -22,6 +23,11 @@ from rag.language import FAILED, NOT_FOUND
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG_PATH = ROOT / "logs" / "events.log"
+
+# source is a label for statistics, not a security control.
+# A chat request may send user, smoke, or test. An empty value means the chat page (user).
+# An old log line with no source is legacy when it is read. It is not rewritten as user.
+REQUEST_SOURCES = ("user", "smoke", "test")
 
 LEVELS = ("INFO", "WARNING", "ERROR")
 # Current file plus this many older files (events.log.1 is the newest backup).
@@ -48,6 +54,28 @@ _default: EventLog | None = None
 def now_stamp() -> str:
     """Local time with a numeric timezone offset, to the millisecond."""
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
+def request_source(value) -> str | None:
+    """Source for a new chat request. None means the value is not allowed.
+
+    Missing or blank is the chat page (user). user, smoke, and test are stored as sent.
+    Anything else is rejected by the caller. This is not an access check.
+    """
+    if value is None or str(value).strip() == "":
+        return "user"
+    text = str(value).strip()
+    if text in REQUEST_SOURCES:
+        return text
+    return None
+
+
+def event_source(event: dict) -> str:
+    """Source shown for a stored line. A line written before this field existed is legacy."""
+    value = event.get("source")
+    if value is None or str(value).strip() == "":
+        return "legacy"
+    return str(value).strip()
 
 
 def classify_outcome(answer: str, tool_error: bool) -> str:
@@ -260,8 +288,15 @@ class EventLog:
 
 
 def get_log() -> EventLog:
+    """The process log. FACTORY_EVENT_LOG points pytest at a temp file instead of logs/events.log."""
     global _default
+    override = os.environ.get("FACTORY_EVENT_LOG")
     with _lock:
+        if override:
+            path = Path(override)
+            if _default is None or _default.path != path:
+                _default = EventLog(path)
+            return _default
         if _default is None:
             _default = EventLog()
         return _default

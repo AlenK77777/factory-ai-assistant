@@ -478,11 +478,14 @@
       URL.revokeObjectURL(url);
     }
 
+    let includeTest = false;
+
     async function loadDashboard() {
       sideBody.textContent = "Generating the dashboard...";
+      const query = includeTest ? "?include_test=1" : "";
       let data;
       try {
-        const response = await fetch("/api/dashboards", {credentials: "same-origin"});
+        const response = await fetch("/api/dashboards" + query, {credentials: "same-origin"});
         data = await response.json();
         if (!response.ok) throw new Error(data.error || "The dashboard could not be built.");
       } catch (error) {
@@ -490,6 +493,17 @@
         return;
       }
       sideBody.textContent = "";
+      const traffic = document.createElement("label");
+      traffic.className = "help";
+      const trafficBox = document.createElement("input");
+      trafficBox.type = "checkbox";
+      trafficBox.checked = includeTest;
+      trafficBox.addEventListener("change", () => {
+        includeTest = trafficBox.checked;
+        loadDashboard();
+      });
+      traffic.appendChild(trafficBox);
+      traffic.appendChild(document.createTextNode(" include test traffic"));
       const tools = document.createElement("div");
       tools.className = "actions";
       const htmlButton = document.createElement("button");
@@ -502,9 +516,10 @@
       excelButton.type = "button";
       excelButton.className = "secondary";
       excelButton.textContent = "Download Excel";
-      excelButton.addEventListener("click", () => { location.href = "/api/dashboards/excel"; });
+      excelButton.addEventListener("click", () => { location.href = "/api/dashboards/excel" + query; });
       tools.appendChild(htmlButton);
       tools.appendChild(excelButton);
+      sideBody.appendChild(traffic);
       const frame = document.createElement("iframe");
       frame.title = "Factory dashboard";
       frame.srcdoc = data.html;
@@ -513,7 +528,7 @@
     }
 
     function detailText(event) {
-      const skip = {timestamp: true, level: true, component: true, event: true};
+      const skip = {timestamp: true, level: true, component: true, event: true, source: true};
       const parts = [];
       for (const key of Object.keys(event)) {
         if (!skip[key]) parts.push(key + "=" + event[key]);
@@ -532,7 +547,7 @@
       const rowFor = (text) => {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 5;
+        cell.colSpan = 6;
         cell.textContent = text;
         row.appendChild(cell);
         table.appendChild(row);
@@ -549,7 +564,8 @@
         for (const event of events) {
           const row = document.createElement("tr");
           row.className = event.level;
-          for (const value of [event.timestamp, event.level, event.component, event.event, detailText(event)]) {
+          const source = event.source || "legacy";
+          for (const value of [event.timestamp, event.level, event.component, event.event, source, detailText(event)]) {
             const cell = document.createElement("td");
             cell.textContent = value;
             row.appendChild(cell);
@@ -607,7 +623,7 @@
       table.id = "event-table";
       const head = document.createElement("thead");
       const headRow = document.createElement("tr");
-      for (const title of ["Time", "Level", "Component", "Event", "Details"]) {
+      for (const title of ["Time", "Level", "Component", "Event", "Source", "Details"]) {
         const cell = document.createElement("th");
         cell.textContent = title;
         headRow.appendChild(cell);
@@ -669,7 +685,7 @@
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({conversation_id: conversationId, message: text}),
+          body: JSON.stringify({conversation_id: conversationId, message: text, source: "user"}),
         });
         const data = await response.json();
         if (!response.ok) {

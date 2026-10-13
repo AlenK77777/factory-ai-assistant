@@ -29,7 +29,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(ROOT / ".env")
 
 from chat.admin_auth import basic_auth_matches, basic_username  # noqa: E402
-from chat.event_log import classify_outcome, get_log, log_event  # noqa: E402
+from chat.event_log import classify_outcome, event_source, get_log, log_event, request_source  # noqa: E402
 from chat.loop import run_turn  # noqa: E402
 from chat.mcp_bridge import McpBridge  # noqa: E402
 from chat.settings import field_specs, load_settings, review, reindex_confirmation_error, update_saved  # noqa: E402
@@ -239,10 +239,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._download_log()
             return
         if path in ("/api/dashboards", "/api/dashboards/"):
-            self._dashboard()
+            self._dashboard(query)
             return
         if path == "/api/dashboards/excel":
-            self._dashboard_excel()
+            self._dashboard_excel(query)
             return
         if path == "/api/settings":
             current = chat_settings()
@@ -288,17 +288,23 @@ class ChatHandler(BaseHTTPRequestHandler):
         if not question:
             self._send_json(400, {"error": "Type a question first."})
             return
+        # source is a label for statistics, not a security control.
+        # Missing means the chat page. An unknown value is rejected, not stored as user.
+        source = request_source(body.get("source")) if "source" in body else "user"
+        if source is None:
+            self._send_json(400, {"error": "source must be user, smoke, or test."})
+            return
         conversation_id = str(body.get("conversation_id") or "").strip() or str(uuid.uuid4())
 
         language = detect_language(question)
         ollama_error = ollama_problem()
         if ollama_error:
-            self._log_question(question, language, "error", 0, [], ollama_error)
+            self._log_question(question, language, "error", 0, [], ollama_error, source)
             self._send_json(503, {"error": ollama_error})
             return
         if not bridge.ready:
             reason = bridge.error or "The MCP server is not available."
-            self._log_question(question, language, "error", 0, [], reason)
+            self._log_question(question, language, "error", 0, [], reason, source)
             self._send_json(503, {"error": reason})
             return
 
@@ -316,12 +322,12 @@ class ChatHandler(BaseHTTPRequestHandler):
             )
         except OllamaError as error:
             elapsed = round(time.perf_counter() - started, 2)
-            self._log_question(question, language, "error", elapsed, [], str(error))
+            self._log_question(question, language, "error", elapsed, [], str(error), source)
             self._send_json(503, {"error": str(error)})
             return
         elapsed = round(time.perf_counter() - started, 2)
         outcome = classify_outcome(result.answer, any(trace.is_error for trace in result.traces))
-        self._log_question(question, result.language, outcome, elapsed, result.traces)
+        self._log_question(question, result.language, outcome, elapsed, result.traces, source=source)
         remember(conversation_id, question, result.answer)
         self._send_json(
             200,
@@ -471,7 +477,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         )
         return {"ollama": ollama, "mcp": mcp, "model": chat_model()}
 
-    def _log_question(self, question: str, language: str, outcome: str, elapsed: float, traces, error: str = "") -> None:
+    def _log_question(self, question: str, language: str, outcome: str, elapsed: float, traces, error: str = "", source: str = "user") -> None:
         settings = chat_settings()
         details = {
             "language": language,
@@ -479,6 +485,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             "settings_version": settings.get("version", ""),
             "latency_s": elapsed,
             "outcome": outcome,
+            "source": source,
             "question": question,
             "tools": [{"name": trace.name, "arguments": trace.arguments} for trace in traces],
         }
@@ -498,15 +505,21 @@ class ChatHandler(BaseHTTPRequestHandler):
             limit = 200
         limit = max(1, min(limit, 1000))
         events = get_log().read_events(level or None, component or None, limit)
+        for event in events:
+            event["source"] = event_source(event)
         self._send_json(200, {"events": events}, no_store=True)
 
     def _download_log(self) -> None:
         body = get_log().read_text().encode("utf-8")
         self._send(200, body, "text/plain; charset=utf-8", 'attachment; filename="events.txt"', no_store=True)
 
-    def _dashboard(self) -> None:
+    def _include_test(self, query: dict) -> bool:
+        flag = (query.get("include_test") or ["0"])[0].strip().lower()
+        return flag in ("1", "true", "yes")
+
+    def _dashboard(self, query: dict) -> None:
         try:
-            report = snapshot()
+            report = snapshot(include_test=self._include_test(query))
             document = render_html(report)
         except Exception as error:  # noqa: BLE001 - the page shows a failure, the process stays up
             log_event("ERROR", "dashboard", "build", error=str(error))
@@ -514,9 +527,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, {"generated_at": report["generated_at"], "html": document}, no_store=True)
 
-    def _dashboard_excel(self) -> None:
+    def _dashboard_excel(self, query: dict) -> None:
         try:
-            report = snapshot()
+            report = snapshot(include_test=self._include_test(query))
             blob = render_excel(report)
         except Exception as error:  # noqa: BLE001
             log_event("ERROR", "dashboard", "excel", error=str(error))

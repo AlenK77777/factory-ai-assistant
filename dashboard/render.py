@@ -18,13 +18,18 @@ def generated_stamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def snapshot(today=None) -> dict:
+def snapshot(today=None, include_test: bool = False) -> dict:
     """Current production and assistant numbers, plus the time they were read."""
     return {
         "generated_at": generated_stamp(),
+        "include_test": include_test,
         "production": fetch_production(today),
-        "ai": load_ai_report(),
+        "ai": load_ai_report(include_test=include_test),
     }
+
+
+# The model returned something. Nobody has checked that it is right.
+FOUND_LABEL = "found an answer (correctness not checked)"
 
 
 def _num(value) -> str:
@@ -42,7 +47,8 @@ def svg_bars(title: str, rows: list[tuple[str, float]]) -> str:
     if not rows:
         return f"<h3>{_esc(title)}</h3><p>No data.</p>"
     row_h = 28
-    label_w = 168
+    longest = max(len(str(label)) for label, _value in rows)
+    label_w = max(168, min(460, longest * 8))
     chart_w = 380
     width = label_w + chart_w + 64
     height = 12 + len(rows) * row_h
@@ -55,7 +61,7 @@ def svg_bars(title: str, rows: list[tuple[str, float]]) -> str:
     for index, (label, value) in enumerate(rows):
         y = 6 + index * row_h
         bar = chart_w * (float(value) / peak)
-        shown = label if len(label) <= 24 else label[:23] + "..."
+        shown = label if len(str(label)) * 8 <= label_w else str(label)[: max(1, label_w // 8 - 1)] + "..."
         parts.append(f'<text x="0" y="{y + 16}" font-size="13" fill="#1c2430">{_esc(shown)}</text>')
         parts.append(f'<rect x="{label_w}" y="{y}" width="{bar:.1f}" height="18" fill="#1f4e79"></rect>')
         parts.append(
@@ -165,7 +171,7 @@ def render_html(report: dict) -> str:
     outcomes = ai["outcomes"]
     total_questions = sum(outcomes.values())
     share_rows = []
-    for key, label in (("found", "Answered"), ("not_found", "Not found"), ("error", "Errors")):
+    for key, label in (("found", FOUND_LABEL), ("not_found", "Not found"), ("error", "Errors")):
         count = outcomes[key]
         percent = round(100.0 * count / total_questions, 1) if total_questions else 0.0
         share_rows.append((f"{label} ({percent:.1f}%)", count))
@@ -193,7 +199,7 @@ def render_html(report: dict) -> str:
         "<p class='note'>Counted from the event log. A question is Not found when the assistant had nothing relevant to answer with.</p>",
         svg_line("Questions per day", [(row["day"], row["count"]) for row in ai["questions_per_day"]]),
         svg_bars("Questions by language", language_rows),
-        svg_bars("Answered, not found, errors", share_rows),
+        svg_bars("Question outcomes", share_rows),
         svg_bars("Tool usage", [(row["name"], row["count"]) for row in ai["tools"]]),
         svg_grouped(
             "Latency by model (seconds)",
@@ -240,6 +246,7 @@ def render_html(report: dict) -> str:
         + "</style></head><body><main>"
         + "<h1>Factory dashboard</h1>"
         + f"<p class='when'>Generated at {_esc(report['generated_at'])}</p>"
+        + f"<p class='when'>Test traffic included: {'yes' if report.get('include_test') else 'no'}</p>"
         + "<p class='note'>Synthetic data. This file has no external images, scripts or fonts.</p>"
         + error
         + "\n".join(sections)
@@ -263,7 +270,7 @@ def _add_sheet(
     sheet.freeze_panes = "A2"
     for column in sheet.columns:
         letter = column[0].column_letter
-        width = max(12, min(42, max(len(str(cell.value or "")) for cell in column) + 2))
+        width = max(12, min(62, max(len(str(cell.value or "")) for cell in column) + 2))
         sheet.column_dimensions[letter].width = width
     if not chart or not rows:
         return
@@ -298,11 +305,13 @@ def render_excel(report: dict) -> bytes:
     overview.title = "Overview"
     overview["A1"] = "Generated at"
     overview["B1"] = report["generated_at"]
-    overview["A2"] = "Note"
-    overview["B2"] = "Synthetic data. Defect rate is defective units / boards ordered. Late means due before today and not Shipped."
+    overview["A2"] = "Test traffic included"
+    overview["B2"] = "yes" if report.get("include_test") else "no"
+    overview["A3"] = "Note"
+    overview["B3"] = "Synthetic data. Defect rate is defective units / boards ordered. Late means due before today and not Shipped."
     if production.get("error"):
-        overview["A3"] = "Production error"
-        overview["B3"] = production["error"]
+        overview["A4"] = "Production error"
+        overview["B4"] = production["error"]
     overview.append([])
     overview.append(["KPI", "Value"])
     for label, value in (
@@ -368,7 +377,7 @@ def render_excel(report: dict) -> bytes:
     )
     total = sum(ai["outcomes"].values())
     outcome_rows = []
-    for key, label in (("found", "Answered"), ("not_found", "Not found"), ("error", "Errors")):
+    for key, label in (("found", FOUND_LABEL), ("not_found", "Not found"), ("error", "Errors")):
         count = ai["outcomes"][key]
         percent = round(100.0 * count / total, 1) if total else 0.0
         outcome_rows.append([label, count, percent])
@@ -401,10 +410,10 @@ def render_excel(report: dict) -> bytes:
     return buffer.getvalue()
 
 
-def build_html(today=None) -> str:
-    return render_html(snapshot(today))
+def build_html(today=None, include_test: bool = False) -> str:
+    return render_html(snapshot(today, include_test=include_test))
 
 
-def build_excel(today=None) -> tuple[str, bytes]:
-    report = snapshot(today)
+def build_excel(today=None, include_test: bool = False) -> tuple[str, bytes]:
+    report = snapshot(today, include_test=include_test)
     return report["generated_at"], render_excel(report)

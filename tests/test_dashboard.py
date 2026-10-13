@@ -67,6 +67,7 @@ def test_ai_report_from_question_events(tmp_path):
         language="en",
         model="qwen3:14b",
         outcome="not_found",
+        source="user",
         latency_s=1.5,
         question="What is the weather?",
         tools=[{"name": "search_instructions", "arguments": {"query": "What is the weather?"}}],
@@ -78,6 +79,7 @@ def test_ai_report_from_question_events(tmp_path):
         language="ru",
         model="qwen3:14b",
         outcome="found",
+        source="user",
         latency_s=3.5,
         question="status",
         tools=[{"name": "get_order_status", "arguments": {"order_id": "PO-1"}}],
@@ -100,6 +102,20 @@ def test_ai_report_from_question_events(tmp_path):
     assert len(report["questions_per_day"]) == 1
 
 
+def test_legacy_and_smoke_are_excluded_unless_test_traffic_is_included(tmp_path):
+    log = EventLog(tmp_path / "events.log")
+    log.write("INFO", "chat", "question", language="en", outcome="found", source="user", question="from the page")
+    log.write("INFO", "chat", "question", language="en", outcome="found", source="smoke", question="from the smoke test")
+    log.write("INFO", "chat", "question", language="en", outcome="not_found", question="written before source existed")
+    events = log.read_events()
+    quiet = ai_report(events)
+    assert quiet["outcomes"] == {"found": 1, "not_found": 0, "error": 0}
+    assert quiet["unanswered"] == []
+    full = ai_report(events, include_test=True)
+    assert full["outcomes"] == {"found": 2, "not_found": 1, "error": 0}
+    assert len(full["unanswered"]) == 1
+
+
 def test_html_is_self_contained_svg():
     report = {
         "generated_at": "2026-10-13T15:00:00+03:00",
@@ -109,6 +125,9 @@ def test_html_is_self_contained_svg():
     document = render_html(report)
     lowered = document.lower()
     assert "Generated at 2026-10-13T15:00:00+03:00" in document
+    assert "Test traffic included: no" in document
+    assert "found an answer (correctness not checked)" in document
+    assert "Answered" not in document
     assert "<svg" in lowered
     assert "<script" not in lowered
     assert "cdn" not in lowered
@@ -152,6 +171,8 @@ def test_excel_has_a_sheet_per_section_and_native_charts():
     ):
         assert name in workbook.sheetnames
     assert workbook["Overview"]["B1"].value == "2026-10-13T15:00:00+03:00"
+    assert workbook["Overview"]["B2"].value == "no"
+    assert workbook["Outcomes"]["A2"].value == "found an answer (correctness not checked)"
     orders = workbook["Orders by status"]
     assert orders["A2"].value == "In Production"
     assert orders["B2"].value == 1

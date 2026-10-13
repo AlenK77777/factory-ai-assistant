@@ -3,7 +3,7 @@
 import json
 import re
 
-from chat.event_log import EventLog, classify_outcome, parse_line
+from chat.event_log import LOG_PATH, EventLog, classify_outcome, event_source, get_log, parse_line, request_source
 from rag.language import FAILED, NOT_FOUND
 
 
@@ -81,6 +81,28 @@ def test_filter_returns_newest_first(tmp_path):
     assert errors[0]["outcome"] == "error"
     latest = log.read_events(component="chat", limit=1)
     assert latest[0]["outcome"] == "found"
+
+
+def test_request_source_rejects_unknown_and_blank_is_user():
+    assert request_source(None) == "user"
+    assert request_source("") == "user"
+    assert request_source("smoke") == "smoke"
+    assert request_source("test") == "test"
+    assert request_source("admin") is None
+
+
+def test_a_line_without_source_is_legacy_and_the_file_is_not_rewritten(tmp_path):
+    log = EventLog(tmp_path / "events.log")
+    log.write("INFO", "chat", "question", outcome="found", question="old")
+    original = log.read_text()
+    parsed = parse_line(original)
+    assert "source" not in parsed
+    assert event_source(parsed) == "legacy"
+    assert log.read_text() == original
+
+
+def test_pytest_does_not_use_the_project_event_log():
+    assert get_log().path != LOG_PATH
 
 
 def test_outcome_classes():

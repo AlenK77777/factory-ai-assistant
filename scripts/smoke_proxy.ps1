@@ -31,7 +31,7 @@ $page = curl.exe -k -sS --max-time 20 -o "$env:TEMP\factory-chat.html" -w "%{htt
 $html = Get-Content "$env:TEMP\factory-chat.html" -Raw -ErrorAction SilentlyContinue
 Check "Chat page loads" ($page -eq "200" -and $html -match "Factory assistant") "HTTP $page"
 
-$body = '{"message":"What is the status of order PO-10049?"}'
+$body = '{"message":"What is the status of order PO-10049?","source":"smoke"}'
 Set-Content -Path "$env:TEMP\factory-chat-q.json" -Value $body -Encoding ascii
 $answerRaw = curl.exe -k -sS --max-time 180 -H "Content-Type: application/json" --data-binary "@$env:TEMP\factory-chat-q.json" "https://localhost:8443/api/chat"
 try { $answer = $answerRaw | ConvertFrom-Json } catch { $answer = $null }
