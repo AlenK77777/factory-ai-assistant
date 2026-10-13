@@ -39,7 +39,7 @@ flowchart LR
 
 | Component | Where it runs | Port |
 |---|---|---|
-| PostgreSQL 16 + pgvector | Docker (`pgvector/pgvector:pg16`) | 5432 |
+| PostgreSQL 16 + pgvector | Docker (`pgvector/pgvector:pg16`) | 127.0.0.1:5432 |
 | NGINX reverse proxy (`nginx:1.28.0-alpine`) | Docker | 127.0.0.1:8088 (HTTP) and 127.0.0.1:8443 (HTTPS) → chat |
 | MCP server | Windows, Python venv, stdio | none |
 | Employee chat | Windows, Python venv | 7777 (127.0.0.1 only, for debugging) |

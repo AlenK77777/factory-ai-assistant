@@ -11,7 +11,8 @@ services:
       MCP_DB_USER: ${MCP_DB_USER:?Set MCP_DB_USER in .env}
       MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?Set MCP_DB_PASSWORD in .env}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # This computer only. Not the home network.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
       # Scripts here run only once, when the volume is empty (first start).

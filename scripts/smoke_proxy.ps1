@@ -118,5 +118,52 @@ if (Test-Path "$env:TEMP\factory-dash.xlsx") { $excelBytes = [System.IO.File]::R
 $isZip = $excelBytes.Length -gt 2 -and $excelBytes[0] -eq 80 -and $excelBytes[1] -eq 75
 Check "Dashboard Excel download works with the password" ($excel -eq "200" -and $isZip) "HTTP $excel"
 
+$envPasswords = @()
+$postgresPassword = $null
+foreach ($line in Get-Content (Join-Path $Root ".env")) {
+    if ($line -match '^\s*POSTGRES_PASSWORD=(.*)$') { $postgresPassword = $Matches[1].Trim() }
+    if ($line -match '^\s*[A-Za-z0-9_]*PASSWORD=(.*)$') {
+        $value = $Matches[1].Trim()
+        if ($value) { $envPasswords += $value }
+    }
+}
+Check "Database password is not the placeholder" ($postgresPassword -and $postgresPassword -ne "change-me") "POSTGRES_PASSWORD is still change-me"
+
+$secretHits = 0
+$unreadable = @()
+$logRoot = Join-Path $Root "logs"
+if (Test-Path $logRoot) {
+    Get-ChildItem $logRoot -Recurse -File -Force | ForEach-Object {
+        $stream = $null
+        $reader = $null
+        try {
+            # The chat process keeps its log files open. ReadWrite still lets us scan them.
+            $stream = [System.IO.File]::Open($_.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $reader = New-Object System.IO.StreamReader($stream)
+            $text = $reader.ReadToEnd()
+        } catch {
+            $script:unreadable += $_.FullName
+            return
+        } finally {
+            if ($reader) { $reader.Dispose() }
+            elseif ($stream) { $stream.Dispose() }
+        }
+        foreach ($secret in $envPasswords) {
+            $from = 0
+            while (($at = $text.IndexOf($secret, $from, [System.StringComparison]::Ordinal)) -ge 0) {
+                $script:secretHits++
+                $from = $at + $secret.Length
+            }
+        }
+    }
+}
+$secretDetail = "matches=$secretHits"
+if ($unreadable.Count -gt 0) { $secretDetail = "unreadable=$($unreadable.Count) $secretDetail" }
+Check "Logs do not contain passwords from .env" ($secretHits -eq 0 -and $unreadable.Count -eq 0) $secretDetail
+
+$published = docker compose ps --all --format "{{.Name}} {{.Ports}}" | Out-String
+$openToAll = $published.Contains("0.0.0.0:") -or $published.Contains("[::]:")
+Check "Published ports are not on all interfaces" (-not $openToAll) ($published.Trim() -replace '\s+', ' ')
+
 if ($failed) { exit 1 }
 Write-Host "Smoke test passed."
