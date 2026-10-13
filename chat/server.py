@@ -32,10 +32,18 @@ from chat.admin_auth import basic_auth_matches, basic_username  # noqa: E402
 from chat.event_log import classify_outcome, event_source, get_log, log_event, request_source  # noqa: E402
 from chat.loop import run_turn  # noqa: E402
 from chat.mcp_bridge import McpBridge  # noqa: E402
-from chat.settings import field_specs, load_settings, review, reindex_confirmation_error, update_saved  # noqa: E402
+from chat.settings import (  # noqa: E402
+    field_specs,
+    load_settings,
+    needs_reindex,
+    restore_previous,
+    review,
+    reindex_confirmation_error,
+    update_saved,
+)
 from dashboard.render import render_excel, render_html, snapshot  # noqa: E402
 from rag.embeddings import OllamaError, ollama_url, post_json  # noqa: E402
-from rag.index_docs import index_documents  # noqa: E402
+from rag.index_docs import index_documents, rollback_index  # noqa: E402
 from rag.language import detect_language  # noqa: E402
 
 HOST = "127.0.0.1"
@@ -271,6 +279,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         if self.path == "/api/settings/apply":
             self._apply()
             return
+        if self.path == "/api/settings/rollback":
+            self._rollback()
+            return
         if self.path == "/api/mcp/restart":
             self._restart_mcp()
             return
@@ -402,15 +413,20 @@ class ChatHandler(BaseHTTPRequestHandler):
         saved_ok = False
         try:
             values = result["values"]
-            if result["needs_reindex"]:
-                emit({"stage": "index", "message": "Re-indexing work instructions."})
-                outcome = index_documents(values, on_progress=emit)
-                if outcome.get("migrated"):
-                    emit({"stage": "migrate", "message": f"Vector column is now {outcome['dimensions']} numbers."})
+            # Save first so a re-index check uses the new k. A failed build restores this file.
             saved = update_saved(values)
+            saved_ok = True
             changes = "; ".join(
                 f"{change['label']}: {change['before']} -> {change['after']}" for change in result["changes"]
             )
+            if result["needs_reindex"]:
+                emit({"stage": "index", "message": "Building a new instruction index. The live chat still uses the old one."})
+                try:
+                    index_documents(values, on_progress=emit)
+                except Exception:
+                    restore_previous()
+                    saved_ok = False
+                    raise
             log_event(
                 "INFO",
                 "settings",
@@ -419,25 +435,56 @@ class ChatHandler(BaseHTTPRequestHandler):
                 changes=changes,
                 reindex=bool(result["needs_reindex"]),
             )
-            saved_ok = True
-            with conversations_lock:
-                conversations.clear()
-            emit({"stage": "mcp", "message": "Restarting the MCP server."})
-            try:
-                bridge.restart()
-            except RuntimeError as error:
-                log_event("ERROR", "mcp", "restart", outcome="error", reason="settings", error=str(error))
-                raise
-            log_event("INFO", "mcp", "restart", outcome="success", reason="settings")
-            emit({
-                "stage": "done",
-                "message": f"Settings version {saved['version']} is active. The chat was reset.",
-                "version": saved["version"],
-            })
+            if result["needs_restart"]:
+                with conversations_lock:
+                    conversations.clear()
+                emit({"stage": "mcp", "message": "Restarting the MCP server."})
+                try:
+                    bridge.restart()
+                except RuntimeError as error:
+                    log_event("ERROR", "mcp", "restart", outcome="error", reason="settings", error=str(error))
+                    raise
+                log_event("INFO", "mcp", "restart", outcome="success", reason="settings")
+                done = f"Settings version {saved['version']} is active. The chat was reset."
+            else:
+                done = f"Settings version {saved['version']} is active."
+            emit({"stage": "done", "message": done, "version": saved["version"]})
         except Exception as error:  # noqa: BLE001 - the panel shows the failure, the process stays up
             if not saved_ok:
                 log_event("ERROR", "settings", "apply", error=str(error))
-            emit({"stage": "error", "message": str(error), "retry": True})
+            emit({"stage": "error", "message": str(error), "retry": bool(result.get("needs_restart"))})
+        finally:
+            apply_lock.release()
+
+    def _rollback(self) -> None:
+        """Restore the previous settings version and, if needed, the previous index."""
+        if not apply_lock.acquire(blocking=False):
+            self._send_json(409, {"error": "Another settings change is already running."})
+            return
+        try:
+            current = chat_settings()
+            restored = restore_previous()
+            index_restored = False
+            if needs_reindex(current, restored):
+                index_restored = rollback_index()
+            log_event(
+                "INFO",
+                "settings",
+                "rollback",
+                version=restored["version"],
+                index_restored=index_restored,
+            )
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "version": restored["version"],
+                    "index_restored": index_restored,
+                    "message": f"Restored settings version {restored['version']}.",
+                },
+            )
+        except RuntimeError as error:
+            self._send_json(409, {"error": str(error)})
         finally:
             apply_lock.release()
 

@@ -4,6 +4,8 @@ Shared by the MCP tool search_instructions and by rag/ask_local.py, so both
 retrieve exactly the same way.
 """
 
+import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 
 from rag.embeddings import embed_query, to_pgvector
@@ -28,29 +30,68 @@ MIN_RELEVANT_SIMILARITY = 0.48
 # k=6 is still the smallest value that always retrieves the required steps.
 DEFAULT_K = 6
 
+# Short check run after a re-index. Each question should surface this file.
+RETRIEVAL_CHECKS = (
+    ("What should I do if delamination is found?", "delamination-containment.md"),
+    ("What are the ESD rules on the line?", "esd-rules.md"),
+    ("How do I release an order that is on hold?", "order-hold-and-release.md"),
+)
+
 SEARCH_SQL = """
     SELECT source, chunk_index, content, embedding <=> %(query)s::vector AS distance
-    FROM doc_chunks
+    FROM {}
     ORDER BY distance
     LIMIT %(k)s
 """
 
 
-def search_chunks(conn, query: str, k: int = DEFAULT_K, min_similarity: float | None = None) -> list[dict]:
-    """Return the k closest chunks, closest first.
+def minimum_k() -> int:
+    """The admin panel value. A caller cannot search fewer chunks than this."""
+    try:
+        from chat.settings import load_settings
 
-    k is used as given. search_instructions decides that number from the admin
-    setting, so the chat model cannot lower it. min_similarity marks the hint
-    flag on each chunk. Raises OllamaError if the question cannot be embedded.
+        return int(load_settings()["retrieval_k"])
+    except Exception:
+        return DEFAULT_K
+
+
+def active_embedding_model(conn) -> str:
+    """Model stored with the live index. Not the setting that an Apply has not swapped in yet."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        try:
+            row = cur.execute("SELECT embedding_model FROM doc_index WHERE id = 1").fetchone()
+        except psycopg.errors.UndefinedTable:
+            row = None
+    if not row or not row.get("embedding_model"):
+        raise RuntimeError("The active index has no embedding model stored in doc_index.")
+    return str(row["embedding_model"])
+
+
+def search_chunks(
+    conn,
+    query: str,
+    k: int = DEFAULT_K,
+    min_similarity: float | None = None,
+    embedding_model: str | None = None,
+    table: str = "doc_chunks",
+) -> list[dict]:
+    """Return the closest chunks, closest first.
+
+    k is raised to the admin panel value when the caller asks for fewer.
+    The query vector uses embedding_model, or the model stored on the active
+    index when that argument is omitted. min_similarity marks the hint flag.
     """
     if min_similarity is None:
         from chat.settings import load_settings
 
         min_similarity = float(load_settings()["similarity_threshold"])
-    k = int(k)
-    query_vector = to_pgvector(embed_query(query))
+    k = max(int(k), minimum_k())
+    if embedding_model is None:
+        embedding_model = active_embedding_model(conn)
+    query_vector = to_pgvector(embed_query(query, model=embedding_model))
+    statement = sql.SQL(SEARCH_SQL).format(sql.Identifier(table))
     with conn.cursor(row_factory=dict_row) as cur:
-        rows = cur.execute(SEARCH_SQL, {"query": query_vector, "k": k}).fetchall()
+        rows = cur.execute(statement, {"query": query_vector, "k": k}).fetchall()
 
     chunks = []
     for row in rows:

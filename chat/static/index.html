@@ -120,6 +120,7 @@
     aside h3 { font-size: 15px; margin: 16px 0 8px; }
     label { display: block; font-weight: 600; margin-top: 10px; }
     .help, .range { display: block; font-weight: 400; color: #5c4a32; font-size: 13px; }
+    .effect { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 700; color: #a15c07; }
     aside input, aside select, aside textarea { width: 100%; margin-top: 4px; font: inherit; padding: 6px; }
     aside input[type="checkbox"] { width: auto; }
     aside textarea { min-height: 140px; }
@@ -166,6 +167,7 @@
       <form id="settings-form"></form>
       <div class="actions">
         <button type="button" id="apply">Apply</button>
+        <button type="button" id="rollback" class="secondary">Rollback</button>
         <button type="button" id="reset" class="secondary">Reset to defaults</button>
       </div>
       <div id="review">
@@ -286,7 +288,11 @@
           form.appendChild(heading);
         }
         const label = document.createElement("label");
-        label.textContent = field.label;
+        label.appendChild(document.createTextNode(field.label));
+        const effect = document.createElement("span");
+        effect.className = "effect";
+        effect.textContent = field.effect_label || "";
+        label.appendChild(effect);
         const help = document.createElement("span");
         help.className = "help";
         help.textContent = field.help;
@@ -379,13 +385,13 @@
       showNotes("settings-warnings", result.warnings || []);
       if (!result.ok) return;
       const lines = result.changes.length
-        ? result.changes.map(change => change.label + ": " + change.before + " → " + change.after + (change.reindex ? " (re-index)" : ""))
+        ? result.changes.map(change => change.label + ": " + change.before + " → " + change.after + " (" + (change.effect_label || "") + ")")
         : ["Nothing will change."];
       if (result.needs_reindex) {
-        lines.push("These indexing changes rebuild every work-instruction chunk.");
+        lines.push("These indexing changes build a new index, then swap it in. The live chat keeps using the old index until the swap.");
       }
       if (result.check_vector_size) {
-        lines.push("The embedding model changed. The vector size will be checked, and the table migrated if it differs, before re-indexing.");
+        lines.push("The embedding model changed. The 0.48 similarity threshold must be re-checked.");
       }
       document.getElementById("review-body").textContent = lines.join("\n");
       document.getElementById("confirm-wrap").style.display = result.needs_reindex ? "block" : "none";
@@ -664,6 +670,14 @@
     window.addEventListener("resize", placeAsk);
 
     document.getElementById("apply").addEventListener("click", () => preview(readForm()));
+    document.getElementById("rollback").addEventListener("click", async () => {
+      const progress = document.getElementById("progress");
+      progress.textContent = "Restoring the previous settings...\n";
+      const response = await fetch("/api/settings/rollback", {method: "POST", credentials: "same-origin"});
+      const data = await response.json();
+      progress.textContent += (data.message || data.error || "Rollback failed.") + "\n";
+      if (data.ok) await loadSettings();
+    });
     document.getElementById("reset").addEventListener("click", () => {
       const defaults = {};
       for (const field of spec.fields) defaults[field.key] = field.default;

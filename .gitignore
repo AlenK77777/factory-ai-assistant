@@ -13,6 +13,7 @@ data/rejected_rows.csv
 # Admin panel settings (not secrets; secrets stay in .env)
 data/chat_settings.json
 data/chat_settings.json.tmp
+data/chat_settings.previous.json
 
 # Chat server log and process id, and NGINX logs
 logs/

@@ -251,8 +251,8 @@ def print_timing(retrieval_s: float, total_s: float, responses: list[dict], thin
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Answer a question from the work instructions with the local model.")
     parser.add_argument("question", nargs="+", help="the question (quotes are optional)")
-    parser.add_argument("-k", type=int, default=DEFAULT_K, choices=range(1, 11), metavar="1-10",
-                        help=f"chunks to retrieve (default {DEFAULT_K}; smaller values are raised to {DEFAULT_K})")
+    parser.add_argument("-k", type=int, default=DEFAULT_K, choices=range(1, 21), metavar="1-20",
+                        help="chunks to retrieve; values below the admin panel k are raised to that k")
     parser.add_argument("--think", action="store_true", help="let qwen3 think before answering (slower)")
     return parser.parse_args()
 

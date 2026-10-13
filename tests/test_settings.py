@@ -6,6 +6,9 @@ from chat import settings as settings_module
 from chat.settings import (
     DEFAULTS,
     MEASURED_MIN_K,
+    REINDEX_KEYS,
+    TUNABLE,
+    effect_for,
     embedding_model_changed,
     needs_reindex,
     reindex_confirmation_error,
@@ -86,6 +89,7 @@ def test_review_of_an_embedding_change_asks_for_a_vector_check():
     assert result["ok"] is True
     assert result["needs_reindex"] is True
     assert result["check_vector_size"] is True
+    assert any("0.48" in note and "re-checked" in note for note in result["warnings"])
 
 
 def test_saved_file_drops_secrets(tmp_path, monkeypatch):
@@ -106,3 +110,9 @@ def test_saved_file_drops_secrets(tmp_path, monkeypatch):
 
 def test_identical_settings_have_an_empty_summary():
     assert summarize_changes(values(), values()) == []
+
+
+def test_every_setting_has_an_effect_and_index_fields_need_reindex():
+    for key in TUNABLE:
+        assert effect_for(key) in ("instant", "reindex", "restart")
+    assert set(REINDEX_KEYS) == {key for key in TUNABLE if effect_for(key) == "reindex"}

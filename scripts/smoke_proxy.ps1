@@ -120,12 +120,14 @@ Check "Dashboard Excel download works with the password" ($excel -eq "200" -and 
 
 $envPasswords = @()
 $postgresPassword = $null
-foreach ($line in Get-Content (Join-Path $Root ".env")) {
-    if ($line -match '^\s*POSTGRES_PASSWORD=(.*)$') { $postgresPassword = $Matches[1].Trim() }
-    if ($line -match '^\s*[A-Za-z0-9_]*PASSWORD=(.*)$') {
-        $value = $Matches[1].Trim()
-        if ($value) { $envPasswords += $value }
+$missingSecrets = @()
+foreach ($name in @("POSTGRES_PASSWORD", "MCP_DB_PASSWORD", "ADMIN_PASSWORD", "INDEX_DB_PASSWORD")) {
+    $value = $null
+    foreach ($line in Get-Content (Join-Path $Root ".env")) {
+        if ($line -match "^\s*$name=(.*)$") { $value = $Matches[1].Trim() }
     }
+    if ($name -eq "POSTGRES_PASSWORD") { $postgresPassword = $value }
+    if ($value) { $envPasswords += $value } else { $missingSecrets += $name }
 }
 Check "Database password is not the placeholder" ($postgresPassword -and $postgresPassword -ne "change-me") "POSTGRES_PASSWORD is still change-me"
 
@@ -158,8 +160,9 @@ if (Test-Path $logRoot) {
     }
 }
 $secretDetail = "matches=$secretHits"
+if ($missingSecrets.Count -gt 0) { $secretDetail = "missing=$($missingSecrets -join ',') $secretDetail" }
 if ($unreadable.Count -gt 0) { $secretDetail = "unreadable=$($unreadable.Count) $secretDetail" }
-Check "Logs do not contain passwords from .env" ($secretHits -eq 0 -and $unreadable.Count -eq 0) $secretDetail
+Check "Logs do not contain passwords from .env" ($secretHits -eq 0 -and $unreadable.Count -eq 0 -and $missingSecrets.Count -eq 0) $secretDetail
 
 $published = docker compose ps --all --format "{{.Name}} {{.Ports}}" | Out-String
 $openToAll = $published.Contains("0.0.0.0:") -or $published.Contains("[::]:")

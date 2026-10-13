@@ -309,8 +309,8 @@ def search_instructions(
             ge=1,
             le=10,
             description=(
-                "Ignored for the search size. The admin setting decides how many chunks "
-                "are returned; this value is only reported as k_requested."
+                "How many chunks to return. Values below the admin panel k are raised "
+                "to that minimum. k_requested is what the caller sent; k_used is what was searched."
             ),
         ),
     ] = DEFAULT_K,
@@ -318,7 +318,7 @@ def search_instructions(
     """Search the plant's work instructions (procedures, limits, escalation rules) by meaning.
     Pass the user's full question; short keyword queries score lower.
     Returns the closest text chunks with their source file and similarity score.
-    The number of chunks is the admin setting, not this argument. k_requested is what the caller sent; k_used is what was searched.
+    The number of chunks is at least the admin panel k. k_requested is what the caller sent; k_used is what was searched.
     `relevant`/`found` are a similarity hint: use a chunk only if its text answers the
     question. If nothing does, say no relevant instruction was found; do not answer
     from general knowledge."""
@@ -327,7 +327,7 @@ def search_instructions(
     query = query.strip()
     settings = load_settings()
     k_requested = k
-    k_used = int(settings["retrieval_k"])
+    k_used = max(int(k), int(settings["retrieval_k"]))
     threshold = float(settings["similarity_threshold"])
     log.info("search_instructions(%r, k_requested=%s, k_used=%s)", query, k_requested, k_used)
     if not query:

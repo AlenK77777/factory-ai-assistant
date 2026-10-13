@@ -10,6 +10,9 @@ services:
       # Read-only role for the MCP server, created by db/init/02_readonly_role.sql.
       MCP_DB_USER: ${MCP_DB_USER:?Set MCP_DB_USER in .env}
       MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?Set MCP_DB_PASSWORD in .env}
+      # Limited role that rebuilds the instruction index (db/init/04_indexer_role.sql).
+      INDEX_DB_USER: ${INDEX_DB_USER:?Set INDEX_DB_USER in .env}
+      INDEX_DB_PASSWORD: ${INDEX_DB_PASSWORD:?Set INDEX_DB_PASSWORD in .env}
     ports:
       # This computer only. Not the home network.
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"

@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SETTINGS_PATH = ROOT / "data" / "chat_settings.json"
+PREVIOUS_PATH = ROOT / "data" / "chat_settings.previous.json"
 
 # Measured on the EN/RU/HE question set after structure-aware chunking.
 MEASURED_MIN_K = 6
@@ -103,7 +104,7 @@ FIELDS = (
         "key": "retrieval_k",
         "group": "Retrieval",
         "label": "k",
-        "help": "How many instruction chunks are searched. The model cannot lower this. Measured minimum for the delamination steps is 6.",
+        "help": "Minimum number of instruction chunks. A request for fewer is raised to this number. 6 was the measured minimum for the delamination steps.",
         "kind": "number",
         "default": MEASURED_MIN_K,
         "minimum": 1,
@@ -125,7 +126,7 @@ FIELDS = (
         "key": "embedding_model",
         "group": "Indexing",
         "label": "Embedding model",
-        "help": "Turns questions and instructions into vectors. Changing it re-indexes, and migrates the table if the vector size changes.",
+        "help": "Turns questions and instructions into vectors. Changing it rebuilds the index in a new table, then swaps it in. The 0.48 threshold was measured for qwen3-embedding:0.6b and must be re-checked.",
         "kind": "model",
         "default": "qwen3-embedding:0.6b",
     },
@@ -164,6 +165,13 @@ FIELDS = (
 
 TUNABLE = tuple(field["key"] for field in FIELDS)
 REINDEX_KEYS = ("embedding_model", "chunking_mode", "chunk_size", "chunk_overlap")
+# Nothing is read only at process start. The tuple stays so a future setting can use it.
+RESTART_KEYS = ()
+EFFECT_LABELS = {
+    "instant": "instant",
+    "reindex": "needs re-index",
+    "restart": "needs restart",
+}
 LABELS = {field["key"]: field["label"] for field in FIELDS}
 DEFAULTS = {field["key"]: field["default"] for field in FIELDS}
 DEFAULTS["version"] = 1
@@ -172,10 +180,20 @@ _KEEP_ALIVE = re.compile(r"^(-1|0|[1-9][0-9]*(?:\.\d+)?(?:ms|s|m|h)?)$")
 _lock = threading.Lock()
 
 
+def effect_for(key: str) -> str:
+    """instant, reindex, or restart. Apply uses this to decide what work to do."""
+    if key in REINDEX_KEYS:
+        return "reindex"
+    if key in RESTART_KEYS:
+        return "restart"
+    return "instant"
+
+
 def field_specs() -> list[dict]:
     """Descriptions for the admin panel. Defaults and ranges, no secrets."""
     specs = []
     for field in FIELDS:
+        effect = effect_for(field["key"])
         specs.append(
             {
                 "key": field["key"],
@@ -188,6 +206,8 @@ def field_specs() -> list[dict]:
                 "maximum": field.get("maximum"),
                 "step": field.get("step"),
                 "options": field.get("options", []),
+                "effect": effect,
+                "effect_label": EFFECT_LABELS[effect],
             }
         )
     return specs
@@ -425,13 +445,16 @@ def summarize_changes(old: dict, new: dict) -> list[dict]:
         if key == "system_prompt":
             shown_before = f"{len(str(before))} characters"
             shown_after = f"{len(str(after))} characters"
+        effect = effect_for(key)
         changes.append(
             {
                 "key": key,
                 "label": LABELS[key],
                 "before": shown_before,
                 "after": shown_after,
-                "reindex": key in REINDEX_KEYS,
+                "reindex": effect == "reindex",
+                "effect": effect,
+                "effect_label": EFFECT_LABELS[effect],
             }
         )
     return changes
@@ -440,6 +463,11 @@ def summarize_changes(old: dict, new: dict) -> list[dict]:
 def needs_reindex(old: dict, new: dict) -> bool:
     """True when the instruction index would no longer match the new settings."""
     return any(old.get(key) != new.get(key) for key in REINDEX_KEYS)
+
+
+def needs_restart(old: dict, new: dict) -> bool:
+    """True when a long-lived process must be restarted before the value is used."""
+    return any(old.get(key) != new.get(key) for key in RESTART_KEYS)
 
 
 def embedding_model_changed(old: dict, new: dict) -> bool:
@@ -457,15 +485,23 @@ def review(old: dict, new: dict, installed_models: list[str] | None) -> dict:
             "warnings": [],
             "changes": [],
             "needs_reindex": False,
+            "needs_restart": False,
             "check_vector_size": False,
         }
     changes = summarize_changes(old, cleaned)
+    warnings = warnings_for(cleaned)
+    if embedding_model_changed(old, cleaned):
+        warnings.append(
+            "The embedding model changed. The 0.48 similarity threshold was measured for "
+            "qwen3-embedding:0.6b and must be re-checked for the new model."
+        )
     return {
         "ok": True,
         "errors": [],
-        "warnings": warnings_for(cleaned),
+        "warnings": warnings,
         "changes": changes,
         "needs_reindex": needs_reindex(old, cleaned),
+        "needs_restart": needs_restart(old, cleaned),
         "check_vector_size": embedding_model_changed(old, cleaned),
         "values": cleaned,
     }
@@ -486,7 +522,22 @@ def _field(key: str) -> dict:
 
 
 def update_saved(values: dict) -> dict:
-    """Increment the version and write the file. Caller has already validated."""
+    """Increment the version and write the file. The previous file is kept for rollback."""
     with _lock:
         current = load_settings()
+        if SETTINGS_PATH.exists():
+            PREVIOUS_PATH.write_bytes(SETTINGS_PATH.read_bytes())
         return save_settings(values, version=int(current["version"]) + 1)
+
+
+def restore_previous() -> dict:
+    """Swap the saved settings with the previous version. Raises if there is nothing to restore."""
+    if not PREVIOUS_PATH.exists():
+        raise RuntimeError("There is no previous settings version to restore.")
+    current = SETTINGS_PATH.read_bytes() if SETTINGS_PATH.exists() else None
+    SETTINGS_PATH.write_bytes(PREVIOUS_PATH.read_bytes())
+    if current is None:
+        PREVIOUS_PATH.unlink()
+    else:
+        PREVIOUS_PATH.write_bytes(current)
+    return load_settings()
