@@ -302,6 +302,10 @@ def test_page_sets_direction_per_message():
     assert "Settings version" in page
     assert "Ask about an order, defects, or a work instruction. Synthetic Data." in page
     assert "English, Russian or Hebrew" not in page
+    assert ">Back</button>" in page
+    assert "Back to chat" not in page
+    assert "document.querySelector(\".side-bottom\").hidden = focusPage;" in page
+    assert "#side .side-bottom[hidden] { display: none; }" in page
     assert 'id="clear-chat"' in page
     assert 'id="export-chat"' in page
     assert 'id="knowledge-base"' in page

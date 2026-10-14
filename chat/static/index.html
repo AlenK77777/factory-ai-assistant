@@ -71,6 +71,7 @@
     #side .side-actions, #side .side-bottom { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
     #side-body { flex: 1; min-height: 0; overflow: auto; }
     #side .side-bottom { margin-top: auto; }
+    #side .side-bottom[hidden] { display: none; }
     #side .side-actions button, #side .side-bottom button { width: 100%; }
     #clear-chat { background: #d97706; }
     #export-chat { background: #1f4e79; }
@@ -164,7 +165,7 @@
   <div class="layout">
     <nav id="side">
       <div class="side-actions">
-        <button type="button" id="back-to-chat" hidden>Back to chat</button>
+        <button type="button" id="back-to-chat" hidden>Back</button>
         <button type="button" id="open-admin">Admin</button>
         <button type="button" id="open-dashboards">Dashboards</button>
         <button type="button" id="open-logs">Logs</button>
@@ -774,8 +775,13 @@
     document.getElementById("open-admin").addEventListener("click", () => {
       if (!adminPage) location.href = "/admin";
     });
-    document.getElementById("back-to-chat").hidden = !(adminPage || onDashboards || onLogs);
+    const focusPage = onDashboards || onLogs;
+    document.getElementById("back-to-chat").hidden = !(adminPage || focusPage);
     document.getElementById("back-to-chat").addEventListener("click", () => { location.href = "/"; });
+    document.getElementById("open-admin").hidden = focusPage;
+    document.getElementById("open-dashboards").hidden = onLogs;
+    document.getElementById("open-logs").hidden = onDashboards;
+    document.querySelector(".side-bottom").hidden = focusPage;
     if (adminPage) {
       loadSettings();
     } else {
