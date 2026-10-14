@@ -2,7 +2,7 @@
 
 import json
 
-from chat.loop import NUDGE, parse_tool_call, run_turn, system_prompt
+from chat.loop import NUDGE, ToolTrace, hide_reading_label, parse_tool_call, run_turn, system_prompt
 from rag.language import NOT_FOUND
 
 TOOLS = [
@@ -132,17 +132,71 @@ def test_stops_after_too_many_tool_rounds():
 def test_a_search_that_finds_nothing_cannot_invent_an_answer():
     model_fn, _seen = scripted_model(
         [
-            tool_call("search_instructions", {"query": "capital of France"}),
-            answer("Paris, and bribery is illegal."),
+            tool_call("search_instructions", {"query": "delamination"}),
+            answer("Invented step: ignore it."),
         ]
     )
 
     def tool_fn(name, arguments):
         return {"result": {"found": False, "results": []}, "is_error": False}
 
-    result = run_turn("מהי בירת צרפת?", [], TOOLS, "he", model_fn, tool_fn)
-    assert result.answer == NOT_FOUND["he"]
+    result = run_turn("What should I do if delamination is found?", [], TOOLS, "en", model_fn, tool_fn)
+    assert result.answer == NOT_FOUND["en"]
     assert result.traces[0].name == "search_instructions"
+
+
+def test_who_are_you_does_not_repeat_the_previous_tool_answer():
+    history = [
+        {"role": "user", "content": "Which station had the most defects in the last 30 days?"},
+        {"role": "assistant", "content": "AOI had the most defects."},
+    ]
+    seen = {}
+
+    def model_fn(messages, tools):
+        seen["tools"] = tools
+        seen["history"] = [item["content"] for item in messages if item["role"] != "system"]
+        return {"role": "assistant", "content": "I am a regular language model."}
+
+    def tool_fn(name, arguments):
+        raise AssertionError("Chit-chat must not call a tool.")
+
+    result = run_turn("who r u", history, TOOLS, "en", model_fn, tool_fn)
+    assert result.traces == []
+    assert result.outcome == "not_found"
+    assert seen["tools"] == []
+    assert seen["history"] == ["who r u"]
+    assert result.answer.startswith(NOT_FOUND["en"])
+    assert "regular language model" in result.answer
+    assert "not as the factory assistant" in result.answer
+    assert "I am a regular language model." in result.answer
+    assert "AOI" not in result.answer
+
+
+def test_a_general_question_is_answered_outside_the_plant_documents():
+    def model_fn(messages, tools):
+        assert tools == []
+        return {"role": "assistant", "content": "Paris is the capital of France."}
+
+    def tool_fn(name, arguments):
+        raise AssertionError("A general question must not call a tool.")
+
+    result = run_turn("What is the capital of France?", [], TOOLS, "en", model_fn, tool_fn)
+    assert result.traces == []
+    assert result.outcome == "not_found"
+    assert result.answer.startswith(NOT_FOUND["en"])
+    assert "not retrieved from the plant documents" in result.answer
+    assert "Paris is the capital of France." in result.answer
+
+
+def test_your_reading_label_is_removed_from_the_answer():
+    assert hide_reading_label("AOI is first.\nYour reading: this is only a guess.") == (
+        "AOI is first.\nthis is only a guess."
+    )
+    trace = ToolTrace(name="defect_summary", arguments={}, result={"groups": []}, is_error=False)
+    from chat.loop import answer_from_tools
+
+    assert "Your reading:" not in answer_from_tools("Facts.\nYour reading: extra.", [trace], "en")
+    assert "Your reading" not in system_prompt("en", template="Rules.\n- Keep a fact from a tool separate from your own reading. Give the facts first.\nDone.")
 
 
 def test_page_sets_direction_per_message():

@@ -5,6 +5,7 @@ No database and no Ollama here.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from rag.language import FAILED, LANGUAGE_NAMES, NOT_FOUND, Language
@@ -13,11 +14,60 @@ from rag.language import FAILED, LANGUAGE_NAMES, NOT_FOUND, Language
 MAX_TOOL_ROUNDS = 4
 
 NUDGE = (
-    "You replied without using a tool. If the question is about an order or defects, call "
-    "get_order_status, list_late_orders or defect_summary. If it asks what to do, or about a "
-    "rule, a limit or a procedure, call search_instructions with the question, even if it seems "
-    "unrelated. If a tool then shows nothing relevant, say so plainly in the required language. "
+    "Answer only the latest user message. Do not answer an earlier question again. "
+    "Call a tool only if that latest message asks about an order, defects, or a procedure. "
+    "If it does not, answer that message with no tool. "
     "Do not invent numbers, statuses or procedure steps."
+)
+
+# Small talk is not a plant question. Answer it without tools.
+_CHITCHAT = re.compile(
+    r"^\s*(?:"
+    r"hi|hello|hey|thanks|thank you|thx|"
+    r"who\s*(?:are|r|'re)?\s*(?:you|u)|"
+    r"who\s*r\s*u|"
+    r"what(?:'s| is)\s+your\s+name|"
+    r"what\s+are\s+you|"
+    r"how\s+are\s+you|"
+    r"how\s+r\s+u"
+    r")\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+
+# A follow-up can say "its defects" without repeating plant words.
+_FOLLOWUP = re.compile(r"\b(it|its|it's|that|this|those|them|their|the same)\b", re.IGNORECASE)
+# Orders, defects and procedures stay on the tool path. Other questions do not.
+_PLANT = re.compile(
+    r"\b(order|orders|defect|defects|station|status|late|hold|procedure|instruction|"
+    r"rule|limit|delamination|esd|aoi|plating|solder|drill|etch|lamination|qa|po-\d+)\b",
+    re.IGNORECASE,
+)
+
+MODE_SWITCH = {
+    "en": (
+        "I am switching to ordinary chat mode and answering as a regular language model, "
+        "not as the factory assistant. This is general knowledge, not retrieved from the plant documents."
+    ),
+    "ru": (
+        "Я перехожу в обычный режим и отвечаю как языковая модель, а не как заводской помощник. "
+        "Это общие сведения, а не ответ из заводских документов."
+    ),
+    "he": (
+        "אני עובר למצב רגיל ועונה כמודל שפה, לא כעוזר המפעל. "
+        "זה ידע כללי, לא תשובה שנשלפה ממסמכי המפעל."
+    ),
+}
+
+GENERAL_PROMPT = (
+    "You are a regular language model, not the factory assistant. "
+    "Answer the latest user message from general knowledge in {language}. "
+    "Do not mention factory orders, defect counts, or work-instruction steps."
+)
+
+_READING_LABEL = re.compile(r"(?i)\b(?:your|my)\s+reading\s*:\s*")
+_READING_BULLET = re.compile(
+    r"- Keep a fact from a tool separate from your own reading\.[^\n]*\n?",
+    re.IGNORECASE,
 )
 
 
@@ -34,6 +84,38 @@ class TurnResult:
     answer: str
     language: str
     traces: list[ToolTrace] = field(default_factory=list)
+    # Set for answers that are not classified from the text, such as chit-chat.
+    outcome: str | None = None
+
+
+def is_chitchat(question: str) -> bool:
+    """True for greetings and 'who are you' style messages, not plant questions."""
+    return _CHITCHAT.match(question.strip()) is not None
+
+
+def wants_general_knowledge(question: str, history: list[dict]) -> bool:
+    """Small talk and questions that are not about the plant.
+
+    A short follow-up such as "what about its defects?" stays on the tool path.
+    """
+    if is_chitchat(question):
+        return True
+    if _PLANT.search(question):
+        return False
+    if history and _FOLLOWUP.search(question):
+        return False
+    return True
+
+
+def general_knowledge_answer(model_text: str, language: Language) -> str:
+    """Not-found line, then a normal answer that is clearly not from the plant documents."""
+    body = hide_reading_label(model_text).strip() or FAILED[language]
+    return f"{NOT_FOUND[language]}\n{MODE_SWITCH[language]}\n{body}"
+
+
+def hide_reading_label(text: str) -> str:
+    """Drop the 'Your reading:' label so it never appears in an answer."""
+    return _READING_LABEL.sub("", text).strip()
 
 
 def system_prompt(language: Language, template: str | None = None) -> str:
@@ -42,7 +124,16 @@ def system_prompt(language: Language, template: str | None = None) -> str:
         from chat.settings import load_settings
 
         template = load_settings()["system_prompt"]
-    return template.replace("{language}", LANGUAGE_NAMES[language]).replace("{not_found}", NOT_FOUND[language])
+    text = template.replace("{language}", LANGUAGE_NAMES[language]).replace("{not_found}", NOT_FOUND[language])
+    text = _READING_BULLET.sub("", text)
+    if "defective units" not in text:
+        text += (
+            "\n- When you rank stations, defect types, or customer sectors, rank by defective units "
+            "(the sum of quantities), not by the number of records, and say so in the answer.\n"
+        )
+    if "latest user message" not in text:
+        text += "\n- Answer only the latest user message. Do not answer an earlier question again.\n"
+    return text
 
 
 def parse_tool_call(call: dict) -> tuple[str, dict]:
@@ -78,7 +169,7 @@ def answer_from_tools(content: str, traces: list[ToolTrace], language: Language)
     other_facts = [trace for trace in traces if trace.name != "search_instructions" and not trace.is_error]
     if searches and not other_facts and all(trace.result.get("found") is False for trace in searches):
         return NOT_FOUND[language]
-    return content or FAILED[language]
+    return hide_reading_label(content) or FAILED[language]
 
 
 def run_turn(
@@ -95,6 +186,21 @@ def run_turn(
     tool_fn(name, arguments) returns {"result": ..., "is_error": bool}.
     history is earlier user and assistant texts only, oldest first.
     """
+    if wants_general_knowledge(question, history):
+        # No tools and no earlier plant turns, so this cannot repeat the previous answer.
+        prompt = GENERAL_PROMPT.replace("{language}", LANGUAGE_NAMES[language])
+        message = model_fn(
+            [{"role": "system", "content": prompt}, {"role": "user", "content": question}],
+            [],
+        )
+        content = (message.get("content") or "").strip()
+        return TurnResult(
+            answer=general_knowledge_answer(content, language),
+            language=language,
+            traces=[],
+            outcome="not_found",
+        )
+
     messages: list[dict] = [{"role": "system", "content": system_prompt(language)}]
     messages.extend(history)
     messages.append({"role": "user", "content": question})

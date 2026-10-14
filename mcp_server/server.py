@@ -117,7 +117,7 @@ class DefectGroup(BaseModel):
     name: str = Field(description="Station, defect type or customer sector")
     defect_count: int = Field(description="Number of defect records")
     defective_units: int = Field(description="Sum of defect quantities")
-    share_pct: float = Field(description="Share of all defect records in the period, in percent")
+    share_pct: float = Field(description="Share of defective units in the period, in percent. Not the share of records.")
 
 
 class DefectSummary(BaseModel):
@@ -127,7 +127,8 @@ class DefectSummary(BaseModel):
     period_end: date
     total_defects: int
     total_units: int
-    groups: list[DefectGroup] = Field(description="Largest group first")
+    ranked_by: str = Field(description="defective_units: groups are ordered by the sum of quantities, not by the number of records")
+    groups: list[DefectGroup] = Field(description="Largest number of defective units first")
 
 
 class InstructionChunk(BaseModel):
@@ -263,8 +264,9 @@ def defect_summary(
     days: Annotated[int, Field(ge=1, le=3650, description="Look back this many days, including today")] = 30,
     group_by: Literal["station", "defect_type", "customer_sector"] = "station",
 ) -> DefectSummary:
-    """Count defects detected in the last `days` days, grouped by station, defect type
-    or customer sector, with each group's share of the total. Use it for questions like
+    """Sum defect quantities in the last `days` days, grouped by station, defect type
+    or customer sector. Groups are ordered by defective units (the sum of quantities),
+    not by the number of records. Say that ranking in the answer. Use it for questions like
     "which station had the most defects?"."""
     period_end = date.today()
     period_start = period_end - timedelta(days=days - 1)
@@ -279,14 +281,18 @@ def defect_summary(
         JOIN orders o ON o.order_id = d.order_id
         WHERE d.detected_date BETWEEN %s AND %s
         GROUP BY {column}
-        ORDER BY defect_count DESC, name
+        ORDER BY defective_units DESC, name
         """
     ).format(column=sql.Identifier(*GROUP_COLUMNS[group_by]))
     rows = fetch_all(query, (period_start, period_end))
 
     total_defects = sum(row["defect_count"] for row in rows)
+    total_units = sum(row["defective_units"] or 0 for row in rows)
     groups = [
-        DefectGroup(**row, share_pct=round(100 * row["defect_count"] / total_defects, 1))
+        DefectGroup(
+            **row,
+            share_pct=round(100 * (row["defective_units"] or 0) / total_units, 1) if total_units else 0.0,
+        )
         for row in rows
     ]
     return DefectSummary(
@@ -295,7 +301,8 @@ def defect_summary(
         period_start=period_start,
         period_end=period_end,
         total_defects=total_defects,
-        total_units=sum(group.defective_units for group in groups),
+        total_units=total_units,
+        ranked_by="defective_units",
         groups=groups,
     )
 

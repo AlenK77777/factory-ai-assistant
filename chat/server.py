@@ -337,7 +337,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._send_json(503, {"error": str(error)})
             return
         elapsed = round(time.perf_counter() - started, 2)
-        outcome = classify_outcome(result.answer, any(trace.is_error for trace in result.traces))
+        outcome = result.outcome or classify_outcome(result.answer, any(trace.is_error for trace in result.traces))
         self._log_question(question, result.language, outcome, elapsed, result.traces, source=source)
         remember(conversation_id, question, result.answer)
         self._send_json(
