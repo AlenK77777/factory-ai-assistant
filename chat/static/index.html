@@ -287,7 +287,33 @@
       return button;
     }
 
-    function addMessage(role, text, meta) {
+    const CHAT_STORE = "factory-chat-messages";
+
+    function scrollToLatest() {
+      const chat = document.querySelector(".chat");
+      if (chat) chat.scrollTop = chat.scrollHeight;
+    }
+
+    function saveChat() {
+      const items = [];
+      for (const article of log.querySelectorAll("article")) {
+        if (article.id === "thinking") continue;
+        const text = article.querySelector(".text");
+        const trace = article.querySelector("pre");
+        items.push({
+          role: article.classList.contains("user") ? "user" : "assistant",
+          text: text ? text.textContent : "",
+          trace: trace ? trace.textContent : "",
+        });
+      }
+      try {
+        localStorage.setItem(CHAT_STORE, JSON.stringify(items));
+      } catch (error) {
+        // A full browser store must not block the chat.
+      }
+    }
+
+    function addMessage(role, text, meta, traceText) {
       const article = document.createElement("article");
       article.className = role;
       const row = document.createElement("div");
@@ -299,7 +325,7 @@
       row.appendChild(body);
       row.appendChild(copyButton(() => body.textContent));
       article.appendChild(row);
-      if (meta) {
+      if (meta || traceText) {
         const traceRow = document.createElement("div");
         traceRow.className = "trace-row";
         const details = document.createElement("details");
@@ -307,7 +333,7 @@
         summary.textContent = "How I got this";
         const pre = document.createElement("pre");
         pre.dir = "auto";
-        pre.textContent = formatTrace(meta);
+        pre.textContent = traceText || formatTrace(meta);
         details.appendChild(summary);
         details.appendChild(pre);
         traceRow.appendChild(details);
@@ -315,7 +341,23 @@
         article.appendChild(traceRow);
       }
       log.appendChild(article);
-      article.scrollIntoView({ block: "nearest" });
+      saveChat();
+      scrollToLatest();
+    }
+
+    function restoreChat() {
+      let items = [];
+      try {
+        items = JSON.parse(localStorage.getItem(CHAT_STORE) || "[]");
+      } catch (error) {
+        items = [];
+      }
+      if (!Array.isArray(items)) return;
+      for (const item of items) {
+        if (!item || (item.role !== "user" && item.role !== "assistant")) continue;
+        addMessage(item.role, item.text || "", null, item.trace || "");
+      }
+      scrollToLatest();
     }
 
     function showThinking() {
@@ -337,7 +379,7 @@
       body.appendChild(dots);
       article.appendChild(body);
       log.appendChild(article);
-      article.scrollIntoView({ block: "nearest" });
+      scrollToLatest();
     }
 
     function hideThinking() {
@@ -380,6 +422,7 @@
 
     function resetConversation() {
       log.textContent = "";
+      localStorage.removeItem(CHAT_STORE);
       conversationId = crypto.randomUUID();
       localStorage.setItem("factory-chat-id", conversationId);
     }
@@ -566,7 +609,6 @@
           const event = JSON.parse(line);
           document.getElementById("progress").textContent += (event.message || event.stage) + "\n";
           if (event.stage === "done") {
-            resetConversation();
             await loadSettings();
           }
           if (event.stage === "error") {
@@ -932,6 +974,7 @@
       }
     });
 
+    restoreChat();
     checkHealth();
   </script>
 </body>

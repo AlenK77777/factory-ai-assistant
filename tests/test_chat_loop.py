@@ -654,6 +654,9 @@ def test_page_sets_direction_per_message():
     assert 'aria-pressed="false"' in page
     assert "Thinking" in page
     assert "Settings used: k=" in page
+    assert 'CHAT_STORE = "factory-chat-messages"' in page
+    assert "chat.scrollTop = chat.scrollHeight" in page
+    assert 'if (event.stage === "done") {\n            await loadSettings();' in page
     assert 'setAttribute("aria-label", "Copy")' in page
     assert "#question { resize: none; }" in page
     assert "overflow: hidden;" in page
