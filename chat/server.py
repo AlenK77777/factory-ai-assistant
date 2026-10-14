@@ -330,6 +330,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 language,
                 model_fn,
                 bridge.call_tool,
+                general_knowledge=bool(chat_settings().get("general_knowledge")),
             )
         except OllamaError as error:
             elapsed = round(time.perf_counter() - started, 2)

@@ -60,7 +60,7 @@ READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 server = MCPServer(
     "factory-db",
     instructions=(
-        "Read-only access to SYNTHETIC production orders, defects and work instructions of a PCB plant. "
+        "Read-only access to SYNTHETIC production orders, defects and work instructions of a Factory. "
         "Answer only from tool results. If a tool returns nothing or an error, say so; "
         "do not guess numbers. For procedures use search_instructions with the user's full question. "
         "Answer only from returned text that really answers the question, and name the instruction file. "

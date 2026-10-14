@@ -59,14 +59,19 @@
       background: #f4f7fb;
       border-right: 1px solid #d5dbe3;
       padding: 16px 12px;
-      max-height: 100vh;
-      overflow: auto;
+      height: 100vh;
+      overflow: hidden;
       display: flex;
       flex-direction: column;
       gap: 8px;
     }
     #side.wide { width: min(640px, 48vw); }
-    #side .side-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+    #side .side-actions, #side .side-bottom { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+    #side-body { flex: 1; min-height: 0; overflow: auto; }
+    #side .side-bottom { margin-top: auto; }
+    #side .side-actions button, #side .side-bottom button { width: 100%; }
+    #clear-chat { background: #d97706; }
+    #export-chat { background: #1f4e79; }
     #side-body iframe {
       width: 100%;
       height: calc(100vh - 150px);
@@ -93,8 +98,32 @@
     }
     .row { max-width: 740px; margin: 0 auto; display: flex; gap: 8px; }
     textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 140px; font: inherit; padding: 8px; border: 1px solid #b7c0cb; border-radius: 8px; }
+    #question { resize: none; }
     button { font: inherit; background: #1f4e79; color: #fff; border: 0; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
     button:disabled { background: #9aa6b2; color: #eef1f4; cursor: not-allowed; }
+    button.copy {
+      background: #fff;
+      color: #1f4e79;
+      border: 1px solid #c5d0dc;
+      padding: 4px;
+      line-height: 0;
+      flex: none;
+    }
+    .message-row, .trace-row { display: flex; align-items: flex-start; gap: 6px; }
+    article.user .message-row { margin-left: auto; }
+    .trace-row { margin-top: 6px; }
+    .trace-row details { flex: 1; margin: 0; }
+    .thinking { color: #3d4b5c; }
+    .dots { color: #1f4e79; font-weight: 700; }
+    .dots span { opacity: 0.25; animation: think 1.2s infinite; }
+    .dots span:nth-child(2) { animation-delay: 0.4s; }
+    .dots span:nth-child(3) { animation-delay: 0.8s; }
+    @keyframes think {
+      0%, 75%, 100% { opacity: 0.25; }
+      40% { opacity: 1; }
+    }
+    #knowledge-base { width: 100%; background: #9aa6b2; text-align: left; margin-bottom: 8px; }
+    #knowledge-base.on { background: #1f4e79; }
     #back-to-chat { background: #15803d; }
     aside {
       width: 400px;
@@ -138,13 +167,17 @@
         <button type="button" id="open-logs">Logs</button>
       </div>
       <div id="side-body"></div>
+      <div class="side-bottom">
+        <button type="button" id="export-chat">Export Chat</button>
+        <button type="button" id="clear-chat">Clear Chat</button>
+      </div>
     </nav>
     <div class="chat">
       <main>
         <div class="top">
           <h1>Factory Assistant</h1>
         </div>
-        <p class="note">Ask about an order, defects, or a work instruction. English, Russian or Hebrew. Synthetic data.</p>
+        <p class="note">Ask about an order, defects, or a work instruction. Synthetic Data.</p>
         <div id="banner"></div>
         <button type="button" id="retry-banner" style="display:none; margin-bottom:12px">Retry</button>
         <div id="log"></div>
@@ -160,6 +193,8 @@
       <span class="badge">ADMIN</span>
       <h2>Admin panel</h2>
       <p class="help">These settings change the assistant on this computer. Passwords stay in .env and are not shown or edited here.</p>
+      <button type="button" id="knowledge-base" aria-pressed="false">Answers from the regular knowledge base: off</button>
+      <p id="knowledge-help" class="help">Off. A question that is not about an order, defects, or a work instruction gets only the “nothing relevant” sentence.</p>
       <p id="version-line" class="help"></p>
       <div id="settings-errors" class="errors"></div>
       <button type="button" id="retry-mcp" style="display:none; margin-bottom:12px">Retry</button>
@@ -221,15 +256,48 @@
       document.getElementById("retry-mcp").style.display = "inline-block";
     }
 
+    const COPY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="9" y="9" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 15V5h10" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+
+    function copyButton(read) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "copy";
+      button.title = "Copy";
+      button.setAttribute("aria-label", "Copy");
+      button.innerHTML = COPY_ICON;
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const value = read();
+        try {
+          await navigator.clipboard.writeText(value);
+        } catch (error) {
+          const area = document.createElement("textarea");
+          area.value = value;
+          document.body.appendChild(area);
+          area.select();
+          document.execCommand("copy");
+          area.remove();
+        }
+      });
+      return button;
+    }
+
     function addMessage(role, text, meta) {
       const article = document.createElement("article");
       article.className = role;
+      const row = document.createElement("div");
+      row.className = "message-row";
       const body = document.createElement("div");
       body.className = "text";
       body.dir = "auto";
       body.textContent = text;
-      article.appendChild(body);
+      row.appendChild(body);
+      row.appendChild(copyButton(() => body.textContent));
+      article.appendChild(row);
       if (meta) {
+        const traceRow = document.createElement("div");
+        traceRow.className = "trace-row";
         const details = document.createElement("details");
         const summary = document.createElement("summary");
         summary.textContent = "How I got this";
@@ -238,10 +306,39 @@
         pre.textContent = formatTrace(meta);
         details.appendChild(summary);
         details.appendChild(pre);
-        article.appendChild(details);
+        traceRow.appendChild(details);
+        traceRow.appendChild(copyButton(() => pre.textContent));
+        article.appendChild(traceRow);
       }
       log.appendChild(article);
       article.scrollIntoView({ block: "nearest" });
+    }
+
+    function showThinking() {
+      hideThinking();
+      const article = document.createElement("article");
+      article.className = "assistant";
+      article.id = "thinking";
+      const body = document.createElement("div");
+      body.className = "text thinking";
+      body.appendChild(document.createTextNode("Thinking"));
+      const dots = document.createElement("span");
+      dots.className = "dots";
+      dots.setAttribute("aria-hidden", "true");
+      for (let step = 0; step < 3; step += 1) {
+        const dot = document.createElement("span");
+        dot.textContent = ".";
+        dots.appendChild(dot);
+      }
+      body.appendChild(dots);
+      article.appendChild(body);
+      log.appendChild(article);
+      article.scrollIntoView({ block: "nearest" });
+    }
+
+    function hideThinking() {
+      const current = document.getElementById("thinking");
+      if (current) current.remove();
     }
 
     function formatTrace(meta) {
@@ -281,6 +378,7 @@
       form.textContent = "";
       let group = "";
       for (const field of spec.fields) {
+        if (field.key === "general_knowledge") continue;
         if (field.group !== group) {
           group = field.group;
           const heading = document.createElement("h3");
@@ -353,6 +451,23 @@
         if (input.dataset.kind === "bool") input.checked = Boolean(value);
         else input.value = value;
       }
+      if (Object.prototype.hasOwnProperty.call(values, "general_knowledge")) {
+        setKnowledge(Boolean(values.general_knowledge));
+      }
+    }
+
+    function setKnowledge(on) {
+      const button = document.getElementById("knowledge-base");
+      button.classList.toggle("on", on);
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+      button.textContent = "Answers from the regular knowledge base: " + (on ? "on" : "off");
+      document.getElementById("knowledge-help").textContent = on
+        ? "On. A question that is not about an order, defects, or a work instruction is answered from general knowledge, and the answer says so."
+        : "Off. A question that is not about an order, defects, or a work instruction gets only the “nothing relevant” sentence.";
+    }
+
+    function knowledgeOn() {
+      return document.getElementById("knowledge-base").getAttribute("aria-pressed") === "true";
     }
 
     function readForm() {
@@ -362,6 +477,7 @@
         else if (input.dataset.kind === "number") values[input.dataset.key] = input.value === "" ? null : Number(input.value);
         else values[input.dataset.key] = input.value;
       }
+      values.general_knowledge = knowledgeOn();
       return values;
     }
 
@@ -687,6 +803,76 @@
     document.getElementById("retry-mcp").addEventListener("click", retryMcp);
     document.getElementById("retry-banner").addEventListener("click", retryMcp);
 
+    function chatTranscript() {
+      const parts = [];
+      for (const article of log.querySelectorAll("article")) {
+        if (article.id === "thinking") continue;
+        const role = article.classList.contains("user") ? "You" : "Assistant";
+        const text = article.querySelector(".text");
+        parts.push(role + ":\n" + (text ? text.textContent : ""));
+        const trace = article.querySelector("pre");
+        if (trace) parts.push("How I got this:\n" + trace.textContent);
+      }
+      return parts.length ? parts.join("\n\n") + "\n" : "No messages.\n";
+    }
+
+    document.getElementById("clear-chat").addEventListener("click", () => {
+      hideThinking();
+      resetConversation();
+    });
+    document.getElementById("export-chat").addEventListener("click", () => {
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      downloadBlob("factory-chat-" + stamp + ".txt", new Blob([chatTranscript()], {type: "text/plain;charset=utf-8"}));
+    });
+    document.getElementById("knowledge-base").addEventListener("click", async () => {
+      if (!spec) return;
+      const previous = knowledgeOn();
+      const next = !previous;
+      setKnowledge(next);
+      const values = Object.assign({}, spec.values, {general_knowledge: next});
+      const response = await fetch("/api/settings/apply", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({values}),
+      });
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const data = await response.json();
+        if (!data.ok && !data.unchanged) {
+          setKnowledge(previous);
+          showNotes("settings-errors", [data.error || "The knowledge base switch did not save."]);
+        }
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let failed = false;
+      while (true) {
+        const step = await reader.read();
+        if (step.done) break;
+        buffer += decoder.decode(step.value, {stream: true});
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          if (event.stage === "done") {
+            spec.values.general_knowledge = next;
+            spec.version = event.version;
+            document.getElementById("version-line").textContent = "Settings version " + event.version;
+            document.getElementById("progress").textContent = (event.message || "Saved.") + "\n";
+          }
+          if (event.stage === "error") {
+            failed = true;
+            showNotes("settings-errors", [event.message || "The knowledge base switch did not save."]);
+          }
+        }
+      }
+      if (failed) setKnowledge(previous);
+    });
+
     ask.addEventListener("submit", async (event) => {
       event.preventDefault();
       const text = question.value.trim();
@@ -694,6 +880,7 @@
       addMessage("user", text);
       question.value = "";
       send.disabled = true;
+      showThinking();
       try {
         const response = await fetch("/api/chat", {
           method: "POST",
@@ -701,12 +888,14 @@
           body: JSON.stringify({conversation_id: conversationId, message: text, source: "user"}),
         });
         const data = await response.json();
+        hideThinking();
         if (!response.ok) {
           addMessage("assistant", data.error || "The request failed.");
           return;
         }
         addMessage("assistant", data.answer, data);
       } catch (error) {
+        hideThinking();
         addMessage("assistant", "The chat server did not respond. Is it still running?");
       } finally {
         send.disabled = false;

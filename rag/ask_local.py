@@ -61,7 +61,7 @@ ANSWER_OPTIONS = {"temperature": 0, "num_ctx": 8192, "num_predict": 1024}
 # and room for the reasoning tokens, which count towards num_predict.
 THINKING_OPTIONS = {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "num_ctx": 8192, "num_predict": 4096}
 
-SYSTEM_PROMPT = """You answer questions from shift managers, QA engineers and planners in a PCB factory.
+SYSTEM_PROMPT = """You answer questions from shift managers, QA engineers and planners in a Factory.
 Use ONLY the work-instruction excerpts in the user's message. Never use general knowledge and never guess.
 
 If the excerpts answer the question:

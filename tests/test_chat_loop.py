@@ -102,6 +102,9 @@ def test_system_prompt_uses_the_question_language():
     assert "Russian" in system_prompt("ru")
     assert "Hebrew" in system_prompt("he")
     assert "English" in system_prompt("en")
+    assert "PCB" not in system_prompt("en")
+    assert "Factory" in system_prompt("en", template="You help a PCB plant.")
+    assert "PCD" not in system_prompt("en", template="You help a PCD line.")
 
 
 def test_tool_error_is_recorded_and_shown_to_the_model():
@@ -145,6 +148,21 @@ def test_a_search_that_finds_nothing_cannot_invent_an_answer():
     assert result.traces[0].name == "search_instructions"
 
 
+def test_who_are_you_stays_unanswered_until_general_knowledge_is_on():
+    history = [
+        {"role": "user", "content": "Which station had the most defects in the last 30 days?"},
+        {"role": "assistant", "content": "AOI had the most defects."},
+    ]
+
+    def model_fn(messages, tools):
+        raise AssertionError("General knowledge is off, so the model must not be called.")
+
+    result = run_turn("who r u", history, TOOLS, "en", model_fn, lambda name, arguments: None)
+    assert result.answer == NOT_FOUND["en"]
+    assert result.outcome == "not_found"
+    assert "AOI" not in result.answer
+
+
 def test_who_are_you_does_not_repeat_the_previous_tool_answer():
     history = [
         {"role": "user", "content": "Which station had the most defects in the last 30 days?"},
@@ -160,7 +178,7 @@ def test_who_are_you_does_not_repeat_the_previous_tool_answer():
     def tool_fn(name, arguments):
         raise AssertionError("Chit-chat must not call a tool.")
 
-    result = run_turn("who r u", history, TOOLS, "en", model_fn, tool_fn)
+    result = run_turn("who r u", history, TOOLS, "en", model_fn, tool_fn, general_knowledge=True)
     assert result.traces == []
     assert result.outcome == "not_found"
     assert seen["tools"] == []
@@ -180,7 +198,9 @@ def test_a_general_question_is_answered_outside_the_plant_documents():
     def tool_fn(name, arguments):
         raise AssertionError("A general question must not call a tool.")
 
-    result = run_turn("What is the capital of France?", [], TOOLS, "en", model_fn, tool_fn)
+    result = run_turn(
+        "What is the capital of France?", [], TOOLS, "en", model_fn, tool_fn, general_knowledge=True
+    )
     assert result.traces == []
     assert result.outcome == "not_found"
     assert result.answer.startswith(NOT_FOUND["en"])
@@ -262,9 +282,30 @@ Delamination usually affects more than one panel. Also put on hold:
     assert mrb >= 0 and scrap > mrb
 
 
+def test_bold_markers_are_removed_from_answers():
+    from chat.loop import answer_from_tools, plain_answer
+
+    assert plain_answer("The **AOI** station is *first*.") == "The AOI station is first."
+    assert "PCB" not in plain_answer("This is a PCB line.")
+    assert "Factory" in plain_answer("This is a PCB line.")
+    trace = ToolTrace(name="defect_summary", arguments={}, result={"groups": []}, is_error=False)
+    answer = answer_from_tools("**AOI** is first.", [trace], "en")
+    assert "*" not in answer
+    assert "AOI" in answer
+
+
 def test_page_sets_direction_per_message():
     page = ( __import__("pathlib").Path(__file__).resolve().parent.parent / "chat" / "static" / "index.html").read_text(encoding="utf-8")
     assert 'dir="auto"' in page
     assert "How I got this" in page
     assert "Admin panel" in page
     assert "Settings version" in page
+    assert "Ask about an order, defects, or a work instruction. Synthetic Data." in page
+    assert "English, Russian or Hebrew" not in page
+    assert 'id="clear-chat"' in page
+    assert 'id="export-chat"' in page
+    assert 'id="knowledge-base"' in page
+    assert 'aria-pressed="false"' in page
+    assert "Thinking" in page
+    assert 'setAttribute("aria-label", "Copy")' in page
+    assert "#question { resize: none; }" in page

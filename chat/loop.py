@@ -110,12 +110,21 @@ def wants_general_knowledge(question: str, history: list[dict]) -> bool:
 def general_knowledge_answer(model_text: str, language: Language) -> str:
     """Not-found line, then a normal answer that is clearly not from the plant documents."""
     body = hide_reading_label(model_text).strip() or FAILED[language]
-    return f"{NOT_FOUND[language]}\n{MODE_SWITCH[language]}\n{body}"
+    return plain_answer(f"{NOT_FOUND[language]}\n{MODE_SWITCH[language]}\n{body}")
 
 
 def hide_reading_label(text: str) -> str:
     """Drop the 'Your reading:' label so it never appears in an answer."""
     return _READING_LABEL.sub("", text).strip()
+
+
+def plain_answer(text: str) -> str:
+    """Show answers as plain text.
+
+    The page does not render markdown, so bold markers show up as asterisks.
+    PCD and PCB are written as Factory.
+    """
+    return text.replace("**", "").replace("__", "").replace("*", "").replace("PCD", "Factory").replace("PCB", "Factory")
 
 
 def system_prompt(language: Language, template: str | None = None) -> str:
@@ -125,6 +134,7 @@ def system_prompt(language: Language, template: str | None = None) -> str:
 
         template = load_settings()["system_prompt"]
     text = template.replace("{language}", LANGUAGE_NAMES[language]).replace("{not_found}", NOT_FOUND[language])
+    text = text.replace("PCD", "Factory").replace("PCB", "Factory")
     text = _READING_BULLET.sub("", text)
     if "defective units" not in text:
         text += (
@@ -296,8 +306,8 @@ def answer_from_tools(content: str, traces: list[ToolTrace], language: Language,
     else:
         body = hide_reading_label(content) or FAILED[language]
     if note:
-        return note + "\n\n" + body
-    return body
+        body = note + "\n\n" + body
+    return plain_answer(body)
 
 
 def run_turn(
@@ -307,6 +317,7 @@ def run_turn(
     language: Language,
     model_fn,
     tool_fn,
+    general_knowledge: bool = False,
 ) -> TurnResult:
     """Ask the model, run any tool calls, and return the answer plus a trace.
 
@@ -315,6 +326,9 @@ def run_turn(
     history is earlier user and assistant texts only, oldest first.
     """
     if wants_general_knowledge(question, history):
+        # Off unless the admin panel turns the regular knowledge base on.
+        if not general_knowledge:
+            return TurnResult(answer=NOT_FOUND[language], language=language, traces=[], outcome="not_found")
         # No tools and no earlier plant turns, so this cannot repeat the previous answer.
         prompt = GENERAL_PROMPT.replace("{language}", LANGUAGE_NAMES[language])
         message = model_fn(

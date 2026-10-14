@@ -18,7 +18,7 @@ CALIBRATED_THRESHOLD = {"qwen3-embedding:0.6b": 0.48}
 
 CHUNKING_MODES = ("structure", "fixed")
 
-DEFAULT_SYSTEM_PROMPT = """You are the assistant for employees of a PCB plant. The data and instructions are synthetic.
+DEFAULT_SYSTEM_PROMPT = """You are the assistant for employees of a Factory. The data and instructions are synthetic.
 
 Write the answer in {language}.
 
@@ -60,6 +60,14 @@ FIELDS = (
         "group": "Chat",
         "label": "Think",
         "help": "Let qwen3 reason before answering. Slower. Tool calls were tested with thinking off.",
+        "kind": "bool",
+        "default": False,
+    },
+    {
+        "key": "general_knowledge",
+        "group": "Chat",
+        "label": "Answers from the regular knowledge base",
+        "help": "Off by default. When off, a question that is not about an order, defects, or a work instruction gets only the fixed “nothing relevant” sentence. When on, that question is answered from general knowledge and the answer says so.",
         "kind": "bool",
         "default": False,
     },
@@ -303,6 +311,13 @@ def validate(raw: dict, installed_models: list[str] | None) -> tuple[dict | None
             errors.append("Think must be on or off.")
         else:
             cleaned["think"] = think
+
+    general_knowledge = require("general_knowledge")
+    if "general_knowledge" in raw:
+        if not isinstance(general_knowledge, bool):
+            errors.append("Answers from the regular knowledge base must be on or off.")
+        else:
+            cleaned["general_knowledge"] = general_knowledge
 
     num_ctx, error = _number(require("num_ctx"), "num_ctx", integer=True)
     if error and "num_ctx" in raw:

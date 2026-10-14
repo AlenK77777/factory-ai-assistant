@@ -112,6 +112,15 @@ def test_identical_settings_have_an_empty_summary():
     assert summarize_changes(values(), values()) == []
 
 
+def test_regular_knowledge_base_is_off_by_default():
+    assert DEFAULTS["general_knowledge"] is False
+    result = review(values(), values(general_knowledge=True), INSTALLED)
+    assert result["ok"] is True
+    assert result["needs_reindex"] is False
+    assert result["changes"][0]["key"] == "general_knowledge"
+    assert result["changes"][0]["after"] is True
+
+
 def test_every_setting_has_an_effect_and_index_fields_need_reindex():
     for key in TUNABLE:
         assert effect_for(key) in ("instant", "reindex", "restart")
