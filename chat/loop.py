@@ -153,11 +153,131 @@ def parse_tool_call(call: dict) -> tuple[str, dict]:
     return name, arguments
 
 
-def answer_from_tools(content: str, traces: list[ToolTrace], language: Language) -> str:
+# Defect names the order record can contradict. Matched only when the user asserts one.
+_CLAIM = re.compile(
+    r"\b(?:has|have|with|shows|showing)\b(?:\s+\w+){0,5}\s+"
+    r"(drill breakout|solder mask defect|plating void|misregistration|delamination|short|open)\b",
+    re.IGNORECASE,
+)
+
+
+def _recorded_defect_types(traces: list[ToolTrace]) -> tuple[str, list[str]]:
+    """Order id and defect type names from get_order_status, if that tool ran."""
+    for trace in traces:
+        if trace.name != "get_order_status" or trace.is_error or not isinstance(trace.result, dict):
+            continue
+        order_id = str(trace.result.get("order_id") or "")
+        names = []
+        for item in trace.result.get("defect_types") or []:
+            if isinstance(item, dict) and item.get("defect_type"):
+                names.append(str(item["defect_type"]))
+        return order_id, names
+    return "", []
+
+
+def contradiction_line(question: str, traces: list[ToolTrace]) -> str:
+    """First line when the user asserts a defect the order record does not list."""
+    claimed = []
+    for match in _CLAIM.finditer(question):
+        kind = match.group(1).casefold()
+        if kind not in claimed:
+            claimed.append(kind)
+    if not claimed:
+        return ""
+    order_id, recorded = _recorded_defect_types(traces)
+    if not order_id and not recorded:
+        return ""
+    recorded_fold = {name.casefold() for name in recorded}
+    missing = [kind for kind in claimed if kind not in recorded_fold]
+    if not missing:
+        return ""
+    if not recorded:
+        shown = "no defect types"
+    elif len(recorded) == 1:
+        shown = recorded[0]
+    else:
+        shown = ", ".join(recorded[:-1]) + " and " + recorded[-1]
+    which = " or ".join(missing)
+    return f"The order record does not show {which} for {order_id}. It shows {shown}."
+
+
+def _instruction_chunks(traces: list[ToolTrace]) -> list[dict]:
+    chunks: list[dict] = []
+    for trace in traces:
+        if trace.name != "search_instructions" or trace.is_error or not isinstance(trace.result, dict):
+            continue
+        if trace.result.get("found") is False:
+            continue
+        rows = [row for row in (trace.result.get("results") or []) if isinstance(row, dict) and row.get("content")]
+        relevant = [row for row in rows if row.get("relevant") is True]
+        chunks.extend(relevant or rows)
+    chunks.sort(key=lambda row: (str(row.get("source") or ""), int(row.get("chunk_index") or 0)))
+    return chunks
+
+
+def _sections_from_chunks(chunks: list[dict]) -> tuple[str, str, list[tuple[str, list[str]]]]:
+    """Document title, source file, and sections in instruction order. Lines stay verbatim."""
+    title = ""
+    source = str(chunks[0].get("source") or "") if chunks else ""
+    sections: list[tuple[str, list[str]]] = []
+    by_title: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for chunk in chunks:
+        if not source:
+            source = str(chunk.get("source") or "")
+        for raw in str(chunk.get("content") or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                heading = line.lstrip("#").strip()
+                if raw.strip().startswith("# ") and not raw.strip().startswith("##") and not title:
+                    title = heading
+                    current = None
+                    continue
+                current = by_title.get(heading)
+                if current is None:
+                    current = []
+                    by_title[heading] = current
+                    sections.append((heading, current))
+                continue
+            if current is None:
+                continue
+            if line not in current:
+                current.append(line)
+    return title, source, sections
+
+
+def format_procedure(traces: list[ToolTrace]) -> str:
+    """Numbered steps copied from the retrieved instruction, grouped by section.
+
+    The summary does not state a disposition. Scrap or use-as-is text stays in the
+    section that contains the MRB step, which the instruction places first there.
+    """
+    chunks = _instruction_chunks(traces)
+    title, source, sections = _sections_from_chunks(chunks)
+    body_sections = [(heading, lines) for heading, lines in sections if lines]
+    if not body_sections:
+        return ""
+    summary = "Steps below are copied from the work instruction"
+    if source:
+        summary += f" {source}"
+    if title:
+        summary += f" ({title})"
+    summary += "."
+    parts = [summary]
+    for heading, lines in body_sections:
+        parts.append(heading + "\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
+
+def answer_from_tools(content: str, traces: list[ToolTrace], language: Language, question: str = "") -> str:
     """Keep the model's words only when a tool returned something it can use.
 
     No tool call, or a search that found nothing, is replaced by the fixed
     "nothing relevant" sentence. That blocks an answer invented from memory.
+    A work instruction is copied from the chunks. A contradicted defect claim
+    is stated before that text.
     """
     if not traces:
         return NOT_FOUND[language]
@@ -169,7 +289,15 @@ def answer_from_tools(content: str, traces: list[ToolTrace], language: Language)
     other_facts = [trace for trace in traces if trace.name != "search_instructions" and not trace.is_error]
     if searches and not other_facts and all(trace.result.get("found") is False for trace in searches):
         return NOT_FOUND[language]
-    return hide_reading_label(content) or FAILED[language]
+    procedure = format_procedure(traces)
+    note = contradiction_line(question, traces)
+    if procedure:
+        body = procedure
+    else:
+        body = hide_reading_label(content) or FAILED[language]
+    if note:
+        return note + "\n\n" + body
+    return body
 
 
 def run_turn(
@@ -250,7 +378,7 @@ def run_turn(
             messages.append({"role": "user", "content": NUDGE})
             continue
         return TurnResult(
-            answer=answer_from_tools(content, traces, language),
+            answer=answer_from_tools(content, traces, language, question),
             language=language,
             traces=traces,
         )

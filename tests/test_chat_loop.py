@@ -199,6 +199,69 @@ def test_your_reading_label_is_removed_from_the_answer():
     assert "Your reading" not in system_prompt("en", template="Rules.\n- Keep a fact from a tool separate from your own reading. Give the facts first.\nDone.")
 
 
+def test_a_false_defect_claim_is_corrected_before_the_procedure():
+    question = "PO-10049 has delamination, what should I do?"
+    instruction = """# WI-QA-031 Delamination Containment
+
+## Immediate actions (first 30 minutes)
+
+1. Stop processing the affected lot. Do not rework, re-press or bake the panels.
+2. Attach a red HOLD tag to every affected panel and move the lot to quarantine rack Q2.
+
+## Containment scope
+
+Delamination usually affects more than one panel. Also put on hold:
+
+- all panels from the same lamination press load (check the press load record);
+
+## Disposition
+
+- The Material Review Board (MRB) decides within 1 working day.
+- For Defense, Aerospace and Medical orders, delaminated boards are always scrapped. "Use as is" is not allowed.
+"""
+    model_fn, _seen = scripted_model(
+        [
+            tool_call("get_order_status", {"order_id": "PO-10049"}),
+            tool_call("search_instructions", {"query": question}),
+            answer("Scrap the boards now. Skip containment."),
+        ]
+    )
+
+    def tool_fn(name, arguments):
+        if name == "get_order_status":
+            return {
+                "result": {
+                    "order_id": "PO-10049",
+                    "defect_types": [
+                        {"defect_type": "Drill Breakout", "count": 1, "units": 25},
+                        {"defect_type": "Open", "count": 1, "units": 10},
+                    ],
+                },
+                "is_error": False,
+            }
+        return {
+            "result": {
+                "found": True,
+                "results": [
+                    {"source": "delamination-containment.md", "chunk_index": 1, "content": instruction, "relevant": True},
+                ],
+            },
+            "is_error": False,
+        }
+
+    result = run_turn(question, [], TOOLS, "en", model_fn, tool_fn)
+    first, _, rest = result.answer.partition("\n")
+    assert first.startswith("The order record does not show delamination for PO-10049.")
+    assert "Drill Breakout and Open" in first
+    assert "Do not rework, re-press or bake" in result.answer
+    assert "Containment scope" in result.answer
+    assert "same lamination press load" in result.answer
+    assert "Scrap the boards now" not in result.answer
+    mrb = result.answer.lower().find("material review board")
+    scrap = result.answer.lower().find("scrapped")
+    assert mrb >= 0 and scrap > mrb
+
+
 def test_page_sets_direction_per_message():
     page = ( __import__("pathlib").Path(__file__).resolve().parent.parent / "chat" / "static" / "index.html").read_text(encoding="utf-8")
     assert 'dir="auto"' in page
