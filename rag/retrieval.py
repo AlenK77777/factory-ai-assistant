@@ -30,6 +30,20 @@ MIN_RELEVANT_SIMILARITY = 0.48
 # k=6 is still the smallest value that always retrieves the required steps.
 DEFAULT_K = 6
 
+
+def instruction_found(result: object) -> bool:
+    """The only definition of a successful instruction search.
+
+    True when at least one returned chunk is marked relevant. Search results,
+    the answer text, the event log and the dashboards all use this.
+    """
+    if not isinstance(result, dict):
+        return False
+    rows = [row for row in (result.get("results") or []) if isinstance(row, dict)]
+    if rows:
+        return any(row.get("relevant") is True for row in rows)
+    return result.get("found") is True
+
 # Short check run after a re-index. Each question should surface this file.
 RETRIEVAL_CHECKS = (
     ("What should I do if delamination is found?", "delamination-containment.md"),

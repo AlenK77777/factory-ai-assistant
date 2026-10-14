@@ -78,11 +78,17 @@ def event_source(event: dict) -> str:
     return str(value).strip()
 
 
-def classify_outcome(answer: str, tool_error: bool) -> str:
-    """found, not_found, or error. Used for chat question events."""
+def classify_outcome(answer: str, tool_error: bool, search_found: bool | None = None) -> str:
+    """found, not_found, or error. Used for chat question events.
+
+    search_found is instruction_found() for this turn. When it is set, it wins
+    over the wording of the answer so the log cannot disagree with the search.
+    """
     if tool_error or answer in FAILED.values():
         return "error"
-    if answer in NOT_FOUND.values():
+    if search_found is True:
+        return "found"
+    if answer in NOT_FOUND.values() or any(answer.startswith(text) for text in NOT_FOUND.values()):
         return "not_found"
     return "found"
 

@@ -37,7 +37,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
 from rag.embeddings import OllamaError  # noqa: E402
-from rag.retrieval import DEFAULT_K, MIN_RELEVANT_SIMILARITY, search_chunks  # noqa: E402
+from rag.retrieval import DEFAULT_K, MIN_RELEVANT_SIMILARITY, instruction_found, search_chunks  # noqa: E402
 
 logging.basicConfig(
     stream=sys.stderr,
@@ -360,7 +360,7 @@ def search_instructions(
         query=query,
         k_requested=k_requested,
         k_used=k_used,
-        found=any(result.relevant for result in results),
+        found=instruction_found({"results": chunks}),
         min_similarity=threshold,
         results=results,
     )

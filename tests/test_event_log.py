@@ -111,3 +111,6 @@ def test_outcome_classes():
     assert classify_outcome(NOT_FOUND["he"], False) == "not_found"
     assert classify_outcome(FAILED["ru"], False) == "error"
     assert classify_outcome("something", True) == "error"
+    assert classify_outcome(NOT_FOUND["ru"], False, search_found=True) == "found"
+    assert classify_outcome("PO-10049 is In QA.", False, search_found=False) == "found"
+    assert classify_outcome(NOT_FOUND["ru"] + "\nMore text.", False) == "not_found"

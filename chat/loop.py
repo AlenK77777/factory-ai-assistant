@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from rag.language import FAILED, LANGUAGE_NAMES, NOT_FOUND, Language
+from rag.retrieval import instruction_found
 
 # A question can need two tools (the order, then the instruction).
 MAX_TOOL_ROUNDS = 4
@@ -33,8 +34,13 @@ _CHITCHAT = re.compile(
     re.IGNORECASE,
 )
 
-# A follow-up can say "its defects" without repeating plant words.
-_FOLLOWUP = re.compile(r"\b(it|its|it's|that|this|those|them|their|the same)\b", re.IGNORECASE)
+# A follow-up can say "its" / "у него" / "שלו" without repeating the order id.
+_FOLLOWUP = re.compile(
+    r"\b(it|its|it's|that|this|those|them|their|the same)\b"
+    r"|его|него|её|ее|неё|нее|их|этот|эта|это"
+    r"|שלו|שלה|שלהם|שלהן",
+    re.IGNORECASE,
+)
 # Orders, defects and procedures stay on the tool path. Other questions do not.
 _PLANT = re.compile(
     r"\b(order|orders|defect|defects|station|status|late|hold|procedure|instruction|"
@@ -121,7 +127,12 @@ _SELF_QUESTION = re.compile(
     r"who\s*(?:are|r|'re)?\s*(?:you|u)|who\s*r\s*u|what\s+are\s+you",
     re.IGNORECASE,
 )
-_DATA = re.compile(r"\b(status|defect|defects|late|how many|which station)\b", re.IGNORECASE)
+_DATA = re.compile(
+    r"\b(status|defect|defects|late|how many|which station)\b"
+    r"|дефект|статус|просроч"
+    r"|פגמ|סטטוס|איחור",
+    re.IGNORECASE,
+)
 _INTERNAL = re.compile(
     r"follow your instructions|only the latest|latest user message|latest message|"
     r"do not answer an earlier|do not invent numbers|call a tool for the latest",
@@ -168,6 +179,8 @@ def wants_general_knowledge(question: str, history: list[dict]) -> bool:
     does not match it. That used to skip tools and answer from general knowledge.
     The server searches the original question before this choice is trusted.
     """
+    if is_data_question(question):
+        return False
     if is_chitchat(question):
         return True
     if _PLANT.search(question):
@@ -451,7 +464,7 @@ def data_answer(question: str, traces: list[ToolTrace], content: str) -> str:
     order = _order_result(traces)
     if not order:
         return ""
-    if re.search(r"\bdefect", question, re.IGNORECASE):
+    if re.search(r"defect|дефект|פגמ", question, re.IGNORECASE):
         return _defect_text(order)
     return _status_text(order)
 
@@ -472,7 +485,7 @@ def answer_from_tools(content: str, traces: list[ToolTrace], language: Language,
         if trace.name == "search_instructions" and not trace.is_error and isinstance(trace.result, dict)
     ]
     other_facts = [trace for trace in traces if trace.name != "search_instructions" and not trace.is_error]
-    if searches and not other_facts and all(trace.result.get("found") is False for trace in searches):
+    if searches and not other_facts and not any(instruction_found(trace.result) for trace in searches):
         return NOT_FOUND[language]
     # The search trace is context. Steps are the answer only for a how-to question.
     procedure = format_procedure(traces) if asks_for_procedure(question) else ""
@@ -485,7 +498,24 @@ def answer_from_tools(content: str, traces: list[ToolTrace], language: Language,
         body = without_internal(hide_reading_label(content)) or FAILED[language]
     if note:
         body = note + "\n\n" + body
-    return plain_answer(body)
+    return plain_answer(_match_found(body, traces, language))
+
+
+def _match_found(answer: str, traces: list[ToolTrace], language: Language) -> str:
+    """Do not say that nothing was found when the shared found rule says it was."""
+    found = any(
+        trace.name == "search_instructions" and not trace.is_error and instruction_found(trace.result)
+        for trace in traces
+    )
+    if not found:
+        return answer
+    prefix = NOT_FOUND[language]
+    if answer.startswith(prefix):
+        answer = answer[len(prefix):].lstrip("\n")
+    if not answer or answer in NOT_FOUND.values():
+        procedure = format_procedure(traces)
+        return procedure or answer
+    return answer
 
 
 def _call_named(name: str, arguments: dict, tool_fn) -> ToolTrace:
@@ -515,6 +545,31 @@ def _server_search(question: str, tool_fn) -> ToolTrace:
         outcome.get("result"),
         bool(outcome.get("is_error")),
     )
+
+
+def _search_found_nothing(trace: ToolTrace) -> bool:
+    """True when this search did not return a relevant instruction."""
+    if trace.name != "search_instructions" or trace.is_error:
+        return True
+    return not instruction_found(trace.result)
+
+
+def _question_in_english(question: str, model_fn) -> str:
+    """Translate a non-English question. Empty when the model does not return one."""
+    try:
+        message = model_fn(
+            [
+                {
+                    "role": "system",
+                    "content": "Translate the question into English. Output only the English question.",
+                },
+                {"role": "user", "content": question},
+            ],
+            [],
+        )
+    except Exception:  # noqa: BLE001 - if translation fails, the normal not-found path still runs
+        return ""
+    return (message.get("content") or "").strip().strip('"')
 
 
 def _append_translation(answer: str, procedure: str, language: Language, model_fn) -> str:
@@ -568,6 +623,21 @@ def run_turn(
             traces=traces,
             outcome="not_found",
         )
+    # A non-English search that found nothing is tried once more, in English, on its own.
+    if (
+        language != "en"
+        and not is_data_question(question)
+        and traces
+        and _search_found_nothing(traces[-1])
+    ):
+        english = _question_in_english(question, model_fn)
+        if english and english.casefold() != question.strip().casefold():
+            english_trace = _server_search(english, tool_fn)
+            english_steps = format_procedure([english_trace])
+            if english_steps:
+                traces.append(english_trace)
+                answer = _append_translation(plain_answer(english_steps), english_steps, language, model_fn)
+                return TurnResult(answer=answer, language=language, traces=traces)
     procedure = format_procedure(traces) if asks_for_procedure(question) else ""
     # A how-to question with no order id is answered from the instruction alone.
     if procedure and not _ORDER_ID.search(question):
@@ -579,7 +649,11 @@ def run_turn(
         )
         return TurnResult(answer=answer, language=language, traces=traces)
 
-    if not procedure and wants_general_knowledge(question, history):
+    search_found = any(
+        trace.name == "search_instructions" and not trace.is_error and instruction_found(trace.result)
+        for trace in traces
+    )
+    if not procedure and not search_found and wants_general_knowledge(question, history):
         # Off unless the admin panel turns the regular knowledge base on.
         if not general_knowledge:
             return TurnResult(answer=NOT_FOUND[language], language=language, traces=traces, outcome="not_found")

@@ -90,47 +90,66 @@ def test_a_reply_without_a_tool_is_nudged_once():
     assert seen[1][0][-1]["content"] == NUDGE
 
 
-def test_history_is_sent_with_the_question():
-    history = [
-        {"role": "user", "content": "What is the status of PO-10049?"},
-        {"role": "assistant", "content": "PO-10049 is In QA, with 2 defects."},
-    ]
-    calls = []
+def test_a_follow_up_in_each_language_loads_the_same_order():
+    from rag.language import NOT_FOUND as NOT_FOUND_TEXT
 
-    def model_fn(messages, tools):
-        calls.append(messages)
-        return {
-            "role": "assistant",
-            "content": "Received. I will follow your instructions to answer only the latest message.",
-        }
+    questions = (
+        ("en", "What is the status of PO-10049?", "What type are its defects?"),
+        ("ru", "Какой статус у заказа PO-10049?", "Какого типа у него дефекты?"),
+        ("he", "מה הסטטוס של הזמנה PO-10049?", "מהם הפגמים שלו?"),
+    )
+    for language, first, follow in questions:
+        calls = []
 
-    def tool_fn(name, arguments):
-        calls.append((name, arguments))
-        assert name == "get_order_status"
-        assert arguments == {"order_id": "PO-10049"}
-        return {
-            "result": {
-                "order_id": "PO-10049",
-                "status": "In QA",
-                "defect_types": [
-                    {"defect_type": "Drill Breakout", "count": 1, "units": 25},
-                    {"defect_type": "Open", "count": 1, "units": 14},
-                ],
-            },
-            "is_error": False,
-        }
+        def model_fn(messages, tools, follow=follow):
+            assert messages[-1]["content"] == follow
+            return {
+                "role": "assistant",
+                "content": "Received. I will follow your instructions to answer only the latest message.",
+            }
 
-    result = run_turn("What type are its defects?", history, TOOLS, "en", model_fn, tool_fn)
-    sent = calls[1]
-    assert sent[0]["role"] == "system"
-    assert sent[1]["content"].startswith("What is the status of PO-10049")
-    assert sent[-1]["content"] == "What type are its defects?"
-    assert calls[0] == ("get_order_status", {"order_id": "PO-10049"})
-    assert "Drill Breakout" in result.answer
-    assert "Open" in result.answer
-    assert "follow your instructions" not in result.answer.lower()
-    assert "latest message" not in result.answer.lower()
-    assert not any(trace.name == "search_instructions" for trace in result.traces)
+        def tool_fn(name, arguments):
+            calls.append((name, arguments))
+            if name == "search_instructions":
+                return {
+                    "result": {
+                        "found": True,
+                        "results": [
+                            {
+                                "source": "esd-rules.md",
+                                "chunk_index": 1,
+                                "content": "## Why it matters\n\nWear a strap.",
+                                "relevant": True,
+                                "similarity": 0.587,
+                            }
+                        ],
+                    },
+                    "is_error": False,
+                }
+            return {
+                "result": {
+                    "order_id": "PO-10049",
+                    "status": "In QA",
+                    "defect_types": [
+                        {"defect_type": "Drill Breakout", "count": 1, "units": 25},
+                        {"defect_type": "Open", "count": 1, "units": 14},
+                    ],
+                },
+                "is_error": False,
+            }
+
+        history = [
+            {"role": "user", "content": first},
+            {"role": "assistant", "content": "PO-10049 is In QA."},
+        ]
+        result = run_turn(follow, history, TOOLS, language, model_fn, tool_fn, general_knowledge=True)
+        assert ("get_order_status", {"order_id": "PO-10049"}) in calls
+        assert not any(name == "search_instructions" for name, _arguments in calls)
+        assert "Drill Breakout" in result.answer
+        assert "Open" in result.answer
+        assert "follow your instructions" not in result.answer.lower()
+        assert NOT_FOUND_TEXT[language] not in result.answer
+        assert "Wear a strap" not in result.answer
 
 
 def test_system_prompt_uses_the_question_language():
@@ -499,6 +518,82 @@ def test_answer_routing_regression():
 
     off = run_turn("What is the capital of France?", [], TOOLS, "en", no_model, off_tool)
     assert off.answer == NOT_FOUND["en"]
+
+
+def test_a_miss_in_another_language_is_searched_again_in_english():
+    russian = "Что делать, если обнаружена деламинация?"
+    hebrew = "מה לעשות אם התגלתה דלמינציה?"
+    english = "What should I do if delamination is found?"
+    instruction = """# WI-QA-031 Delamination Containment
+
+## Immediate actions (first 30 minutes)
+
+1. Stop processing the affected lot. Do not rework, re-press or bake the panels.
+"""
+
+    def model_fn(messages, tools):
+        assert tools == []
+        if "into English" in messages[0]["content"]:
+            return {"role": "assistant", "content": english}
+        return {"role": "assistant", "content": "Translated steps."}
+
+    def tool_fn(name, arguments):
+        assert name == "search_instructions"
+        query = arguments["query"]
+        if query in (russian, hebrew):
+            return {"result": {"found": False, "results": []}, "is_error": False}
+        assert query == english
+        return {
+            "result": {
+                "found": True,
+                "results": [
+                    {
+                        "source": "delamination-containment.md",
+                        "chunk_index": 2,
+                        "content": instruction,
+                        "relevant": True,
+                        "similarity": 0.76,
+                    }
+                ],
+            },
+            "is_error": False,
+        }
+
+    for language, question in (("ru", russian), ("he", hebrew)):
+        result = run_turn(question, [], TOOLS, language, model_fn, tool_fn)
+        assert "Do not rework, re-press or bake" in result.answer
+        assert "delamination-containment.md" in result.answer
+        assert "Machine translation, the original above is binding." in result.answer
+        assert "Translated steps." in result.answer
+        assert result.answer.index("Do not rework") < result.answer.index("Translated steps.")
+        assert NOT_FOUND[language] not in result.answer
+
+
+def test_another_language_still_says_nothing_when_english_also_misses():
+    def model_fn(messages, tools):
+        assert "into English" in messages[0]["content"]
+        return {"role": "assistant", "content": "What is the capital of France?"}
+
+    def tool_fn(name, arguments):
+        assert name == "search_instructions"
+        return {"result": {"found": False, "results": []}, "is_error": False}
+
+    result = run_turn("Какая столица Франции?", [], TOOLS, "ru", model_fn, tool_fn)
+    assert result.answer == NOT_FOUND["ru"]
+
+
+def test_an_english_miss_is_not_translated_and_searched_again():
+    queries = []
+
+    def tool_fn(name, arguments):
+        queries.append(arguments["query"])
+        return {"result": {"found": False, "results": []}, "is_error": False}
+
+    model_fn, seen = scripted_model([answer("Invented step."), answer("Still invented.")])
+    result = run_turn("What should I do if delamination is found?", [], TOOLS, "en", model_fn, tool_fn)
+    assert result.answer == NOT_FOUND["en"]
+    assert queries == ["What should I do if delamination is found?"]
+    assert all("into English" not in message[0]["content"] for message, _tools in seen)
 
 
 def test_a_wrong_days_late_calculation_is_replaced_with_the_tool_value():

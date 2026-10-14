@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 
 from mcp_server.server import search_instructions
-from rag.retrieval import search_chunks
+from rag.retrieval import instruction_found, search_chunks
 
 
 def _rows():
@@ -52,6 +52,12 @@ class Connection:
 def _patch_embed(monkeypatch):
     monkeypatch.setattr("rag.retrieval.embed_query", lambda query, model=None: [0.0])
     monkeypatch.setattr("rag.retrieval.to_pgvector", lambda vector: "[0]")
+
+
+def test_instruction_found_is_true_only_when_a_chunk_is_relevant():
+    assert instruction_found({"found": True, "results": [{"relevant": False}, {"relevant": True}]}) is True
+    assert instruction_found({"found": True, "results": [{"relevant": False}]}) is False
+    assert instruction_found({"found": False, "results": []}) is False
 
 
 def test_search_chunks_uses_the_k_it_is_given(monkeypatch):

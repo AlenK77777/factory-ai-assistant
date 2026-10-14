@@ -45,6 +45,7 @@ from dashboard.render import render_excel, render_html, snapshot  # noqa: E402
 from rag.embeddings import OllamaError, ollama_url, post_json  # noqa: E402
 from rag.index_docs import index_documents, rollback_index  # noqa: E402
 from rag.language import detect_language  # noqa: E402
+from rag.retrieval import instruction_found  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 7777
@@ -354,7 +355,18 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._send_json(503, {"error": str(error)})
             return
         elapsed = round(time.perf_counter() - started, 2)
-        outcome = result.outcome or classify_outcome(result.answer, any(trace.is_error for trace in result.traces))
+        search_found = any(
+            trace.name == "search_instructions" and not trace.is_error and instruction_found(trace.result)
+            for trace in result.traces
+        )
+        # A relevant instruction is found for the log as well as the answer.
+        if search_found:
+            outcome = "found"
+        else:
+            outcome = result.outcome or classify_outcome(
+                result.answer,
+                any(trace.is_error for trace in result.traces),
+            )
         self._log_question(question, result.language, outcome, elapsed, result.traces, source=source)
         remember(conversation_id, question, result.answer)
         self._send_json(
