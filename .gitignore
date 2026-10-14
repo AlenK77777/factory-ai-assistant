@@ -24,3 +24,8 @@ nginx/auth/
 
 # Excel lock files created while a workbook is open
 ~$*.xlsx
+
+# Drop folders for the Power Automate inbox loader
+inbox/
+processed/
+failed/

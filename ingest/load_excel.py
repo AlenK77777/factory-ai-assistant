@@ -12,6 +12,7 @@ All database work happens in one transaction: either everything is saved or noth
 Usage (from the project root, with the venv active):
     python ingest/load_excel.py
     python ingest/load_excel.py --orders data/production_orders.xlsx --defects data/defects.xlsx
+    python ingest/load_excel.py --file inbox/production_orders.xlsx --rejected-csv processed/rejected.csv
 """
 
 import argparse
@@ -65,6 +66,17 @@ ORDER_COLUMNS = [
     "due_date",
 ]
 DEFECT_COLUMNS = ["defect_id", "order_id", "detected_date", "station", "defect_type", "quantity"]
+# Headers that identify a workbook. The file name is not used.
+DEFECT_MARKERS = {"defect_id", "defect_type"}
+ORDER_MARKERS = {"customer_sector", "product_type", "layers", "due_date", "created_date"}
+
+
+class SpreadsheetError(Exception):
+    """The workbook cannot be loaded. The message is safe to print."""
+
+
+class DatabaseUnreachable(Exception):
+    """PostgreSQL did not accept a connection. The message does not include a password."""
 
 
 # ---------------------------------------------------------------------------
@@ -260,19 +272,45 @@ INSERT_RUN = """
 """
 
 
+def column_names(path: Path) -> list[str]:
+    """Header row only. Raises SpreadsheetError when the file cannot be read."""
+    if not path.exists():
+        raise SpreadsheetError(f"File not found: {path.name}")
+    try:
+        frame = pd.read_excel(path, nrows=0, dtype=object, engine="openpyxl")
+    except PermissionError as error:
+        raise SpreadsheetError(f"Cannot read {path.name}. It may be open in Excel.") from error
+    return [str(column).strip() for column in frame.columns]
+
+
+def classify_columns(columns: list[str]) -> str | None:
+    """Return 'orders' or 'defects' from the header, or None when it matches neither."""
+    names = {str(column).strip() for column in columns}
+    if names & DEFECT_MARKERS:
+        return "defects"
+    if names & ORDER_MARKERS:
+        return "orders"
+    return None
+
+
+def classify_workbook(path: Path) -> str | None:
+    """What this workbook contains, judged by its columns."""
+    return classify_columns(column_names(path))
+
+
 def read_excel(path: Path, required_columns: list[str]) -> pd.DataFrame:
     """Read an Excel file as raw values (validation does the type checks)."""
     if not path.exists():
-        sys.exit(f"File not found: {path}\nCreate the sample files with: python scripts/generate_data.py")
+        raise SpreadsheetError(f"File not found: {path.name}")
     try:
         df = pd.read_excel(path, dtype=object, engine="openpyxl")
-    except PermissionError:
-        sys.exit(f"Cannot read {path}. Is it open in Excel? Close it and try again.")
+    except PermissionError as error:
+        raise SpreadsheetError(f"Cannot read {path.name}. It may be open in Excel.") from error
 
     df.columns = [str(column).strip() for column in df.columns]
     missing = [column for column in required_columns if column not in df.columns]
     if missing:
-        sys.exit(f"{path.name} is missing columns: {', '.join(missing)}")
+        raise SpreadsheetError(f"{path.name} is missing columns: {', '.join(missing)}")
     return df
 
 
@@ -295,7 +333,9 @@ def connect() -> psycopg.Connection:
             connect_timeout=5,
         )
     except psycopg.OperationalError as error:
-        sys.exit(f"Cannot connect to PostgreSQL at {host}:{port}.\n{error}\nIs the database running? Check: docker compose ps")
+        raise DatabaseUnreachable(
+            f"Cannot connect to PostgreSQL at {host}:{port}. Is the database running?"
+        ) from error
 
 
 def load_file(conn, path: Path, valid: list[dict], rejected: list[dict], upsert_sql: str, started_at) -> None:
@@ -305,20 +345,83 @@ def load_file(conn, path: Path, valid: list[dict], rejected: list[dict], upsert_
         cur.execute(INSERT_RUN, (path.name, started_at, len(valid), len(rejected)))
 
 
-def write_rejected(rejected: list[dict]) -> None:
-    """Write all rejected rows (from both files) to data/rejected_rows.csv."""
+def write_rejected(rejected: list[dict], path: Path | None = None) -> None:
+    """Write rejected rows to path, or to data/rejected_rows.csv when path is omitted."""
+    target = path or REJECTED_CSV
     columns = ["source_file", "excel_row", "reason"] + ORDER_COLUMNS
     columns += [column for column in DEFECT_COLUMNS if column not in columns]
+    target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        pd.DataFrame(rejected, columns=columns).to_csv(REJECTED_CSV, index=False)
-    except PermissionError:
-        sys.exit(f"Cannot write {REJECTED_CSV}. Is it open in Excel? Close it and run the loader again.")
+        pd.DataFrame(rejected, columns=columns).to_csv(target, index=False)
+    except PermissionError as error:
+        raise SpreadsheetError(f"Cannot write {target.name}. It may be open in Excel.") from error
+
+
+def probe_database() -> bool:
+    """True when PostgreSQL accepts a connection. Does not print secrets."""
+    try:
+        with connect() as conn:
+            conn.execute("SELECT 1")
+    except (DatabaseUnreachable, OSError):
+        return False
+    return True
+
+
+def load_single(path: Path, rejected_csv: Path | None = None) -> tuple[int, int]:
+    """Load one workbook. Returns (rows loaded, rows rejected)."""
+    kind = classify_workbook(path)
+    if kind == "orders":
+        frame = read_excel(path, ORDER_COLUMNS)
+    elif kind == "defects":
+        frame = read_excel(path, DEFECT_COLUMNS)
+    else:
+        raise SpreadsheetError(f"{path.name} is neither an orders file nor a defects file.")
+
+    with connect() as conn:
+        started_at = datetime.now(timezone.utc)
+        if kind == "orders":
+            valid, rejected = validate_orders(frame)
+            load_file(conn, path, valid, rejected, UPSERT_ORDER, started_at)
+        else:
+            known_order_ids = {row[0] for row in conn.execute("SELECT order_id FROM orders")}
+            valid, rejected = validate_defects(frame, known_order_ids)
+            load_file(conn, path, valid, rejected, UPSERT_DEFECT, started_at)
+
+    write_rejected([{"source_file": path.name, **row} for row in rejected], rejected_csv)
+    return len(valid), len(rejected)
+
+
+def record_inbox(file_name: str, result: str, loaded: int, rejected: int) -> None:
+    """One inbox run in the event log. source=automation. No secrets."""
+    from chat.event_log import log_event
+
+    level = "ERROR" if result == "failed" else "INFO"
+    log_event(
+        level,
+        "ingest",
+        "inbox",
+        source="automation",
+        file=file_name,
+        result=result,
+        rows_loaded=loaded,
+        rows_rejected=rejected,
+    )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Load orders and defects from Excel into PostgreSQL.")
     parser.add_argument("--orders", type=Path, default=DATA_DIR / "production_orders.xlsx")
     parser.add_argument("--defects", type=Path, default=DATA_DIR / "defects.xlsx")
+    parser.add_argument("--file", type=Path, help="Load this one workbook. Its columns decide orders or defects.")
+    parser.add_argument("--rejected-csv", type=Path, help="Where to write rejected rows for --file.")
+    parser.add_argument("--check", action="store_true", help="Exit 0 when the database accepts a connection.")
+    parser.add_argument("--detect", type=Path, help="Print orders, defects, or unknown for this workbook.")
+    parser.add_argument(
+        "--inbox-log",
+        nargs=4,
+        metavar=("FILE", "RESULT", "LOADED", "REJECTED"),
+        help="Write one inbox event with source=automation.",
+    )
     return parser.parse_args()
 
 
@@ -328,11 +431,41 @@ def main() -> None:
     from chat.event_log import log_event
 
     args = parse_args()
+    if args.inbox_log:
+        file_name, result, loaded, rejected = args.inbox_log
+        record_inbox(file_name, result, int(loaded), int(rejected))
+        return
+    if args.check:
+        if not probe_database():
+            print("Database is not reachable. Nothing was moved.")
+            sys.exit(2)
+        return
+    if args.detect:
+        try:
+            kind = classify_workbook(args.detect)
+        except SpreadsheetError:
+            print("unknown")
+            sys.exit(2)
+        print(kind or "unknown")
+        sys.exit(0 if kind else 2)
+    if args.file:
+        try:
+            loaded, rejected = load_single(args.file, args.rejected_csv)
+        except (SpreadsheetError, DatabaseUnreachable):
+            print(f"{args.file.name}: failed", file=sys.stderr)
+            sys.exit(2)
+        print(f"{args.file.name}: {loaded} loaded, {rejected} rejected")
+        sys.exit(1 if rejected else 0)
     try:
         _load(args, log_event)
-    except (Exception, SystemExit) as error:
-        detail = error.code if isinstance(error, SystemExit) else error
-        log_event("ERROR", "ingest", "excel", error=str(detail))
+    except DatabaseUnreachable as error:
+        log_event("ERROR", "ingest", "excel", error="database unreachable")
+        sys.exit(str(error))
+    except SpreadsheetError as error:
+        log_event("ERROR", "ingest", "excel", error=str(error))
+        sys.exit(str(error))
+    except Exception as error:
+        log_event("ERROR", "ingest", "excel", error=str(error))
         raise
 
 
