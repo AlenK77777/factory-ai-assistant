@@ -113,7 +113,7 @@ FIELDS = (
         "key": "retrieval_k",
         "group": "Retrieval",
         "label": "k",
-        "help": "Minimum number of instruction chunks. A request for fewer is raised to this number. 6 was the measured minimum for the delamination steps.",
+        "help": "Number of instruction chunks every search uses. 6 was measured for the delamination steps. A smaller value is saved and used as entered.",
         "kind": "number",
         "default": MEASURED_MIN_K,
         "minimum": 1,

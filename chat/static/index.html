@@ -347,6 +347,19 @@
 
     function formatTrace(meta) {
       const lines = ["Settings version: " + meta.settings_version, "Model: " + meta.model, "Time: " + meta.elapsed_s + " s"];
+      if (meta.settings_used) {
+        const used = meta.settings_used;
+        lines.push(
+          "Settings used: k=" + used.retrieval_k
+          + ", threshold=" + used.similarity_threshold
+          + ", temperature=" + used.temperature
+          + ", think=" + used.think
+          + ", context=" + used.num_ctx
+          + ", keep alive=" + used.keep_alive
+          + ", history=" + used.history_turns
+          + ", general knowledge=" + used.general_knowledge
+        );
+      }
       if (!meta.tools.length) lines.push("No tools were called.");
       for (const tool of meta.tools) {
         lines.push("");

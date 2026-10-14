@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from chat.event_log import log_event  # noqa: E402
 from rag.embeddings import OllamaError, embed_documents, to_pgvector  # noqa: E402
-from rag.retrieval import RETRIEVAL_CHECKS, minimum_k  # noqa: E402
+from rag.retrieval import RETRIEVAL_CHECKS  # noqa: E402
 
 DOCS_DIR = ROOT / "docs" / "instructions"
 CHUNK_SIZE = 500
@@ -94,19 +94,28 @@ def _blocks(section: str) -> tuple[str, list[tuple[str, bool]]]:
     return heading, merged
 
 
-def split_by_size(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Fallback for a long block that is not a numbered list.
+def _sentence_pieces(text: str) -> list[str] | None:
+    """Sentences when the text has end punctuation. None when it has none."""
+    if not re.search(r"[.!?]", text):
+        return None
+    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()]
+    return parts or None
 
-    Cuts at a paragraph, line, sentence or word in the second half of the window,
-    and overlaps the next chunk by about `overlap` characters.
-    """
-    text = text.strip()
+
+def _join_len(parts: list[str]) -> int:
+    if not parts:
+        return 0
+    return sum(len(part) for part in parts) + len(parts) - 1
+
+
+def _split_unscentenced(text: str, size: int, overlap: int) -> list[str]:
+    """Size fallback for text that has no sentence end. Cuts on a space when it can."""
     chunks = []
     start = 0
     while start < len(text):
         end = min(start + size, len(text))
         if end < len(text):
-            for separator in ("\n\n", "\n", ". ", " "):
+            for separator in ("\n\n", "\n", " "):
                 cut = text.rfind(separator, start + size // 2, end)
                 if cut != -1:
                     end = cut + len(separator)
@@ -121,6 +130,45 @@ def split_by_size(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLA
         next_start = end - overlap
         space = text.find(" ", next_start, end)
         start = space + 1 if space != -1 else next_start
+    return chunks
+
+
+def split_by_size(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Fallback for a long block that is not a numbered list.
+
+    Cuts only between sentences. The old overlap rewound by a fixed number of
+    characters, so the next chunk could start mid-sentence ("tag, and record who").
+    Overlap now keeps whole sentences, or none.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    sentences = _sentence_pieces(text)
+    if sentences is None:
+        return _split_unscentenced(text, size, overlap)
+
+    chunks: list[str] = []
+    current: list[str] = []
+
+    def emit() -> None:
+        nonlocal current
+        if not current:
+            return
+        chunks.append(" ".join(current))
+        kept: list[str] = []
+        for sentence in reversed(current):
+            trial = [sentence, *kept]
+            if _join_len(trial) > overlap:
+                break
+            kept.insert(0, sentence)
+        current = kept
+
+    for sentence in sentences:
+        if current and _join_len(current) + 1 + len(sentence) > size:
+            emit()
+        current.append(sentence)
+    if current:
+        chunks.append(" ".join(current))
     return chunks
 
 
@@ -164,7 +212,7 @@ def split_section(section: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 
 
 def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Split on Markdown headings. Never split a numbered list. Use `size` only as a fallback."""
+    """Split on Markdown headings. Never split a numbered list or a sentence."""
     text = text.strip()
     if not text:
         return []
@@ -424,8 +472,8 @@ def _index_documents(settings: dict, on_progress=None) -> dict:
         raise RuntimeError("No chunks were produced, so the live index was left unchanged.")
 
     report("save", f"Saving {len(rows)} chunks into a new table")
-    k = int(settings.get("retrieval_k") or minimum_k())
-    threshold = float(settings.get("similarity_threshold") or 0.48)
+    k = int(settings["retrieval_k"])
+    threshold = float(settings["similarity_threshold"])
     try:
         with connect() as conn:
             drop_table(conn, BUILDING)

@@ -252,7 +252,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Answer a question from the work instructions with the local model.")
     parser.add_argument("question", nargs="+", help="the question (quotes are optional)")
     parser.add_argument("-k", type=int, default=DEFAULT_K, choices=range(1, 21), metavar="1-20",
-                        help="chunks to retrieve; values below the admin panel k are raised to that k")
+                        help="chunks to retrieve for this command")
     parser.add_argument("--think", action="store_true", help="let qwen3 think before answering (slower)")
     return parser.parse_args()
 

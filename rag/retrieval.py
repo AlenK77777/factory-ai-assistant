@@ -45,16 +45,6 @@ SEARCH_SQL = """
 """
 
 
-def minimum_k() -> int:
-    """The admin panel value. A caller cannot search fewer chunks than this."""
-    try:
-        from chat.settings import load_settings
-
-        return int(load_settings()["retrieval_k"])
-    except Exception:
-        return DEFAULT_K
-
-
 def active_embedding_model(conn) -> str:
     """Model stored with the live index. Not the setting that an Apply has not swapped in yet."""
     with conn.cursor(row_factory=dict_row) as cur:
@@ -77,7 +67,7 @@ def search_chunks(
 ) -> list[dict]:
     """Return the closest chunks, closest first.
 
-    k is raised to the admin panel value when the caller asks for fewer.
+    k is used as given. Callers that should follow the admin panel pass that saved k.
     The query vector uses embedding_model, or the model stored on the active
     index when that argument is omitted. min_similarity marks the hint flag.
     """
@@ -85,7 +75,7 @@ def search_chunks(
         from chat.settings import load_settings
 
         min_similarity = float(load_settings()["similarity_threshold"])
-    k = max(int(k), minimum_k())
+    k = int(k)
     if embedding_model is None:
         embedding_model = active_embedding_model(conn)
     query_vector = to_pgvector(embed_query(query, model=embedding_model))

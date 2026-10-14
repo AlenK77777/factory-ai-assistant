@@ -2,7 +2,15 @@
 
 import json
 
-from chat.loop import NUDGE, ToolTrace, hide_reading_label, parse_tool_call, run_turn, system_prompt
+from chat.loop import (
+    NUDGE,
+    SELF_DESCRIPTION,
+    ToolTrace,
+    hide_reading_label,
+    parse_tool_call,
+    run_turn,
+    system_prompt,
+)
 from rag.language import NOT_FOUND
 
 TOOLS = [
@@ -51,9 +59,10 @@ def test_calls_a_tool_then_answers_from_its_result():
     result = run_turn("What is the status of PO-10049?", [], TOOLS, "en", model_fn, tool_fn)
 
     assert calls == [("get_order_status", {"order_id": "PO-10049"})]
+    assert not any(name == "search_instructions" for name, _arguments in calls)
     assert result.answer.startswith("PO-10049 is In QA")
-    assert result.traces[0].name == "get_order_status"
-    assert result.traces[0].result["status"] == "In QA"
+    order_trace = next(trace for trace in result.traces if trace.name == "get_order_status")
+    assert order_trace.result["status"] == "In QA"
     tool_messages = [message for message in seen[1][0] if message["role"] == "tool"]
     assert json.loads(tool_messages[0]["content"])["status"] == "In QA"
     assert seen[0][1] == TOOLS
@@ -86,16 +95,42 @@ def test_history_is_sent_with_the_question():
         {"role": "user", "content": "What is the status of PO-10049?"},
         {"role": "assistant", "content": "PO-10049 is In QA, with 2 defects."},
     ]
-    # The first reply uses no tool, so the loop asks once more. The history is on the first call.
-    model_fn, seen = scripted_model([answer("Short, 2 records."), answer("Short, 2 records.")])
-    result = run_turn("What type are its defects?", history, TOOLS, "en", model_fn, lambda n, a: None)
+    calls = []
 
-    sent = seen[0][0]
+    def model_fn(messages, tools):
+        calls.append(messages)
+        return {
+            "role": "assistant",
+            "content": "Received. I will follow your instructions to answer only the latest message.",
+        }
+
+    def tool_fn(name, arguments):
+        calls.append((name, arguments))
+        assert name == "get_order_status"
+        assert arguments == {"order_id": "PO-10049"}
+        return {
+            "result": {
+                "order_id": "PO-10049",
+                "status": "In QA",
+                "defect_types": [
+                    {"defect_type": "Drill Breakout", "count": 1, "units": 25},
+                    {"defect_type": "Open", "count": 1, "units": 14},
+                ],
+            },
+            "is_error": False,
+        }
+
+    result = run_turn("What type are its defects?", history, TOOLS, "en", model_fn, tool_fn)
+    sent = calls[1]
     assert sent[0]["role"] == "system"
     assert sent[1]["content"].startswith("What is the status of PO-10049")
     assert sent[-1]["content"] == "What type are its defects?"
-    assert "In QA" in sent[2]["content"]
-    assert result.answer == NOT_FOUND["en"]
+    assert calls[0] == ("get_order_status", {"order_id": "PO-10049"})
+    assert "Drill Breakout" in result.answer
+    assert "Open" in result.answer
+    assert "follow your instructions" not in result.answer.lower()
+    assert "latest message" not in result.answer.lower()
+    assert not any(trace.name == "search_instructions" for trace in result.traces)
 
 
 def test_system_prompt_uses_the_question_language():
@@ -105,6 +140,12 @@ def test_system_prompt_uses_the_question_language():
     assert "PCB" not in system_prompt("en")
     assert "Factory" in system_prompt("en", template="You help a PCB plant.")
     assert "PCD" not in system_prompt("en", template="You help a PCD line.")
+    today = __import__("datetime").date.today().isoformat()
+    prompt = system_prompt("en")
+    assert f"Today's date is {today}" in prompt
+    assert "days_late" in prompt
+    assert "Never calculate a date" in prompt
+    assert "resolve words such as it" in prompt
 
 
 def test_tool_error_is_recorded_and_shown_to_the_model():
@@ -148,46 +189,21 @@ def test_a_search_that_finds_nothing_cannot_invent_an_answer():
     assert result.traces[0].name == "search_instructions"
 
 
-def test_who_are_you_stays_unanswered_until_general_knowledge_is_on():
+def test_who_are_you_is_a_fixed_description():
     history = [
         {"role": "user", "content": "Which station had the most defects in the last 30 days?"},
         {"role": "assistant", "content": "AOI had the most defects."},
     ]
 
     def model_fn(messages, tools):
-        raise AssertionError("General knowledge is off, so the model must not be called.")
+        raise AssertionError("Who-are-you does not call the model.")
 
-    result = run_turn("who r u", history, TOOLS, "en", model_fn, lambda name, arguments: None)
-    assert result.answer == NOT_FOUND["en"]
-    assert result.outcome == "not_found"
+    result = run_turn("who are you", history, TOOLS, "en", model_fn, lambda name, arguments: None)
+    assert result.answer == (
+        "I am the Factory Assistant. I answer questions about orders, defects, and work instructions."
+    )
     assert "AOI" not in result.answer
-
-
-def test_who_are_you_does_not_repeat_the_previous_tool_answer():
-    history = [
-        {"role": "user", "content": "Which station had the most defects in the last 30 days?"},
-        {"role": "assistant", "content": "AOI had the most defects."},
-    ]
-    seen = {}
-
-    def model_fn(messages, tools):
-        seen["tools"] = tools
-        seen["history"] = [item["content"] for item in messages if item["role"] != "system"]
-        return {"role": "assistant", "content": "I am a regular language model."}
-
-    def tool_fn(name, arguments):
-        raise AssertionError("Chit-chat must not call a tool.")
-
-    result = run_turn("who r u", history, TOOLS, "en", model_fn, tool_fn, general_knowledge=True)
-    assert result.traces == []
-    assert result.outcome == "not_found"
-    assert seen["tools"] == []
-    assert seen["history"] == ["who r u"]
-    assert result.answer.startswith(NOT_FOUND["en"])
-    assert "regular language model" in result.answer
-    assert "not as the factory assistant" in result.answer
-    assert "I am a regular language model." in result.answer
-    assert "AOI" not in result.answer
+    assert "Steps below are copied" not in result.answer
 
 
 def test_a_general_question_is_answered_outside_the_plant_documents():
@@ -196,12 +212,15 @@ def test_a_general_question_is_answered_outside_the_plant_documents():
         return {"role": "assistant", "content": "Paris is the capital of France."}
 
     def tool_fn(name, arguments):
-        raise AssertionError("A general question must not call a tool.")
+        assert name == "search_instructions"
+        assert arguments["query"] == "What is the capital of France?"
+        return {"result": {"found": False, "results": []}, "is_error": False}
 
     result = run_turn(
         "What is the capital of France?", [], TOOLS, "en", model_fn, tool_fn, general_knowledge=True
     )
-    assert result.traces == []
+    assert result.traces[0].name == "search_instructions"
+    assert result.traces[0].result["found"] is False
     assert result.outcome == "not_found"
     assert result.answer.startswith(NOT_FOUND["en"])
     assert "not retrieved from the plant documents" in result.answer
@@ -217,6 +236,82 @@ def test_your_reading_label_is_removed_from_the_answer():
 
     assert "Your reading:" not in answer_from_tools("Facts.\nYour reading: extra.", [trace], "en")
     assert "Your reading" not in system_prompt("en", template="Rules.\n- Keep a fact from a tool separate from your own reading. Give the facts first.\nDone.")
+
+
+def test_delamination_questions_return_the_instruction_in_every_language():
+    """Russian used to miss the English plant-word list and skip the tool."""
+    instruction = """# WI-QA-031 Delamination Containment
+
+## Immediate actions (first 30 minutes)
+
+1. Stop processing the affected lot. Do not rework, re-press or bake the panels.
+
+## Containment scope
+
+- all panels from the same lamination press load (check the press load record);
+"""
+    questions = (
+        ("en", "What should I do if delamination is found?"),
+        ("ru", "Что делать, если обнаружена деламинация?"),
+        ("he", "מה לעשות אם התגלתה דלמינציה?"),
+    )
+    for language, question in questions:
+        def model_fn(messages, tools, language=language):
+            assert language != "en"
+            assert tools == []
+            assert "Translate" in messages[0]["content"]
+            assert "regular language model" not in messages[0]["content"]
+            return {"role": "assistant", "content": "Translated steps."}
+
+        def tool_fn(name, arguments, question=question):
+            assert name == "search_instructions"
+            assert arguments["query"] == question
+            return {
+                "result": {
+                    "found": True,
+                    "results": [
+                        {
+                            "source": "plating-void-investigation.md",
+                            "chunk_index": 2,
+                            "content": "## Immediate actions\n\n1. Identify all lots that went through the same electroless copper run.",
+                            "relevant": True,
+                            "similarity": 0.70,
+                        },
+                        {
+                            "source": "delamination-containment.md",
+                            "chunk_index": 2,
+                            "content": instruction,
+                            "relevant": True,
+                            "similarity": 0.76,
+                        },
+                        {
+                            "source": "delamination-containment.md",
+                            "chunk_index": 3,
+                            "content": "## Containment scope\n\n- all panels from the same lamination press load (check the press load record);",
+                            "relevant": True,
+                            "similarity": 0.68,
+                        },
+                    ],
+                },
+                "is_error": False,
+            }
+
+        result = run_turn(question, [], TOOLS, language, model_fn, tool_fn, general_knowledge=True)
+        assert "delamination-containment.md" in result.answer
+        assert "Do not rework, re-press or bake" in result.answer
+        assert "Containment scope" in result.answer
+        assert "epoxy" not in result.answer.lower()
+        assert "electroless" not in result.answer.lower()
+        assert "regular language model" not in result.answer
+        if language == "en":
+            assert "Machine translation" not in result.answer
+        else:
+            original, marker, translation = result.answer.partition(
+                "Machine translation, the original above is binding."
+            )
+            assert "Do not rework, re-press or bake" in original
+            assert marker
+            assert "Translated steps." in translation
 
 
 def test_a_false_defect_claim_is_corrected_before_the_procedure():
@@ -263,7 +358,13 @@ Delamination usually affects more than one panel. Also put on hold:
             "result": {
                 "found": True,
                 "results": [
-                    {"source": "delamination-containment.md", "chunk_index": 1, "content": instruction, "relevant": True},
+                    {
+                        "source": "delamination-containment.md",
+                        "chunk_index": 1,
+                        "content": instruction,
+                        "relevant": True,
+                        "similarity": 0.76,
+                    },
                 ],
             },
             "is_error": False,
@@ -280,6 +381,152 @@ Delamination usually affects more than one panel. Also put on hold:
     mrb = result.answer.lower().find("material review board")
     scrap = result.answer.lower().find("scrapped")
     assert mrb >= 0 and scrap > mrb
+
+
+def test_every_search_requests_the_saved_k(monkeypatch):
+    question = "What should I do if delamination is found?"
+    import chat.settings as settings_module
+
+    original = settings_module.load_settings
+
+    def check(saved_k: int) -> None:
+        def fake_settings(saved_k=saved_k):
+            values = dict(original())
+            values["retrieval_k"] = saved_k
+            return values
+
+        monkeypatch.setattr(settings_module, "load_settings", fake_settings)
+        seen = []
+
+        def tool_fn(name, arguments):
+            seen.append((name, arguments.get("k")))
+            if name == "get_order_status":
+                return {"result": {"order_id": "PO-10049", "status": "In QA"}, "is_error": False}
+            return {"result": {"found": False, "results": []}, "is_error": False}
+
+        model_fn, _seen = scripted_model(
+            [
+                tool_call("get_order_status", {"order_id": "PO-10049"}),
+                answer("PO-10049 is In QA."),
+            ]
+        )
+        run_turn(question, [], TOOLS, "en", model_fn, tool_fn)
+        assert ("search_instructions", saved_k) in seen
+        assert all(item == ("search_instructions", saved_k) or item[0] == "get_order_status" for item in seen)
+
+    check(6)
+    check(4)
+
+
+def test_answer_routing_regression():
+    """Status uses the database. How-to uses the instruction. Chat and off-topic do not."""
+    status = "What is the status of order PO-10049?"
+    model_fn, _seen = scripted_model(
+        [
+            tool_call("get_order_status", {"order_id": "PO-10049"}),
+            answer("PO-10049 is In QA."),
+        ]
+    )
+
+    def status_tool(name, arguments):
+        if name == "get_order_status":
+            return {"result": {"order_id": "PO-10049", "status": "In QA"}, "is_error": False}
+        return {
+            "result": {
+                "found": True,
+                "results": [
+                    {
+                        "source": "order-hold-and-release.md",
+                        "chunk_index": 6,
+                        "content": "tag, and record who released the order and why.",
+                        "relevant": True,
+                        "similarity": 0.558,
+                    }
+                ],
+            },
+            "is_error": False,
+        }
+
+    result = run_turn(status, [], TOOLS, "en", model_fn, status_tool)
+    assert result.answer.startswith("PO-10049 is In QA")
+    assert "Steps below are copied" not in result.answer
+    assert "tag, and record who" not in result.answer
+    assert any(trace.name == "get_order_status" for trace in result.traces)
+    assert not any(trace.name == "search_instructions" for trace in result.traces)
+
+    how_to = (
+        ("en", "What should I do if delamination is found?"),
+        ("ru", "Что делать, если обнаружена деламинация?"),
+        ("he", "מה לעשות אם התגלתה דלמינציה?"),
+    )
+
+    def how_model(messages, tools):
+        assert tools == []
+        return {"role": "assistant", "content": "Translated steps."}
+
+    def how_tool(name, arguments):
+        assert name == "search_instructions"
+        return {
+            "result": {
+                "found": True,
+                "results": [
+                    {
+                        "source": "delamination-containment.md",
+                        "chunk_index": 2,
+                        "content": "1. Do not rework, re-press or bake the panels.",
+                        "relevant": True,
+                        "similarity": 0.76,
+                    }
+                ],
+            },
+            "is_error": False,
+        }
+
+    for language, question in how_to:
+        result = run_turn(question, [], TOOLS, language, how_model, how_tool)
+        assert "delamination-containment.md" in result.answer
+        assert "Do not rework, re-press or bake" in result.answer
+        assert "order-hold-and-release" not in result.answer
+
+    def no_model(messages, tools):
+        raise AssertionError("This question does not call the model.")
+
+    who = run_turn("who are you", [], TOOLS, "en", no_model, lambda name, arguments: None)
+    assert who.answer == SELF_DESCRIPTION["en"]
+
+    def off_tool(name, arguments):
+        return {"result": {"found": False, "results": []}, "is_error": False}
+
+    off = run_turn("What is the capital of France?", [], TOOLS, "en", no_model, off_tool)
+    assert off.answer == NOT_FOUND["en"]
+
+
+def test_a_wrong_days_late_calculation_is_replaced_with_the_tool_value():
+    assert (__import__("datetime").date(2026, 10, 14) - __import__("datetime").date(2026, 7, 3)).days == 103
+    model_fn, _seen = scripted_model(
+        [
+            tool_call("get_order_status", {"order_id": "PO-10049"}),
+            answer("PO-10049 is In QA, 16 days late (due July 3)."),
+        ]
+    )
+
+    def tool_fn(name, arguments):
+        assert name == "get_order_status"
+        return {
+            "result": {
+                "order_id": "PO-10049",
+                "status": "In QA",
+                "due_date": "2026-07-03",
+                "is_late": True,
+                "days_late": 103,
+            },
+            "is_error": False,
+        }
+
+    result = run_turn("What is the status of order PO-10049?", [], TOOLS, "en", model_fn, tool_fn)
+    assert "103 days late" in result.answer
+    assert "16 days" not in result.answer
+    assert not any(trace.name == "search_instructions" for trace in result.traces)
 
 
 def test_bold_markers_are_removed_from_answers():
@@ -311,6 +558,7 @@ def test_page_sets_direction_per_message():
     assert 'id="knowledge-base"' in page
     assert 'aria-pressed="false"' in page
     assert "Thinking" in page
+    assert "Settings used: k=" in page
     assert 'setAttribute("aria-label", "Copy")' in page
     assert "#question { resize: none; }" in page
     assert "overflow: hidden;" in page

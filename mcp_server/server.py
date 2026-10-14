@@ -92,6 +92,7 @@ class OrderStatus(BaseModel):
     created_date: date
     due_date: date
     is_late: bool = Field(description="due_date is before today and the order is not Shipped")
+    days_late: int = Field(description="CURRENT_DATE minus due_date when the order is late, otherwise 0. Do not recompute this.")
     defect_count: int = Field(description="Number of defect records logged for this order")
     defective_units: int = Field(description="Sum of the quantities of those defect records")
     defect_types: list[DefectTypeTotal] = Field(description="Those defects grouped by type, largest first")
@@ -143,7 +144,7 @@ class InstructionChunk(BaseModel):
 class InstructionSearch(BaseModel):
     query: str
     k_requested: int = Field(description="k the caller asked for")
-    k_used: int = Field(description="k actually searched; never below the measured minimum of 6")
+    k_used: int = Field(description="k from the admin panel, which is the number of chunks searched")
     found: bool = Field(description="True if at least one chunk is above the similarity threshold")
     min_similarity: float = Field(description="Threshold used for 'relevant'")
     results: list[InstructionChunk] = Field(description="Closest first")
@@ -197,7 +198,8 @@ def fetch_all(query, params=()) -> list[dict]:
 @server.tool(annotations=READ_ONLY)
 def get_order_status(order_id: str) -> OrderStatus:
     """Get one production order by id (for example PO-10001): its status, dates,
-    production line, whether it is late, and the defect types logged for it."""
+    production line, whether it is late, days_late from the database, and the defect types logged for it.
+    days_late is computed in SQL. Do not calculate dates or day counts yourself."""
     order_id = order_id.strip().upper()
     log.info("get_order_status(%s)", order_id)
     if not order_id:
@@ -207,6 +209,12 @@ def get_order_status(order_id: str) -> OrderStatus:
         """
         SELECT o.order_id, o.customer_sector, o.product_type, o.layers, o.quantity,
                o.status, o.production_line, o.created_date, o.due_date,
+               (o.status <> 'Shipped' AND o.due_date < CURRENT_DATE) AS is_late,
+               CASE
+                   WHEN o.status <> 'Shipped' AND o.due_date < CURRENT_DATE
+                   THEN (CURRENT_DATE - o.due_date)
+                   ELSE 0
+               END AS days_late,
                COUNT(d.defect_id) AS defect_count,
                COALESCE(SUM(d.quantity), 0) AS defective_units
         FROM orders o
@@ -220,7 +228,6 @@ def get_order_status(order_id: str) -> OrderStatus:
         raise ToolError(f"Order {order_id} was not found. Order ids look like PO-10001.")
 
     order = rows[0]
-    is_late = order["due_date"] < date.today() and order["status"] != "Shipped"
     type_rows = fetch_all(
         """
         SELECT defect_type, COUNT(*) AS count, COALESCE(SUM(quantity), 0) AS units
@@ -233,7 +240,6 @@ def get_order_status(order_id: str) -> OrderStatus:
     )
     return OrderStatus(
         **order,
-        is_late=is_late,
         defect_types=[DefectTypeTotal(**row) for row in type_rows],
     )
 
@@ -313,11 +319,9 @@ def search_instructions(
     k: Annotated[
         int,
         Field(
-            ge=1,
-            le=10,
             description=(
-                "How many chunks to return. Values below the admin panel k are raised "
-                "to that minimum. k_requested is what the caller sent; k_used is what was searched."
+                "Ignored for the search. The admin panel k is used. "
+                "k_requested is what the caller sent; k_used is the saved panel k."
             ),
         ),
     ] = DEFAULT_K,
@@ -325,7 +329,7 @@ def search_instructions(
     """Search the plant's work instructions (procedures, limits, escalation rules) by meaning.
     Pass the user's full question; short keyword queries score lower.
     Returns the closest text chunks with their source file and similarity score.
-    The number of chunks is at least the admin panel k. k_requested is what the caller sent; k_used is what was searched.
+    The number of chunks is the admin panel k. k_requested is what the caller sent; k_used is the saved panel k.
     `relevant`/`found` are a similarity hint: use a chunk only if its text answers the
     question. If nothing does, say no relevant instruction was found; do not answer
     from general knowledge."""
@@ -333,8 +337,8 @@ def search_instructions(
 
     query = query.strip()
     settings = load_settings()
-    k_requested = k
-    k_used = max(int(k), int(settings["retrieval_k"]))
+    k_requested = int(k)
+    k_used = int(settings["retrieval_k"])
     threshold = float(settings["similarity_threshold"])
     log.info("search_instructions(%r, k_requested=%s, k_used=%s)", query, k_requested, k_used)
     if not query:

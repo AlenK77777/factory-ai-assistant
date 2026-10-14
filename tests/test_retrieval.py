@@ -54,22 +54,45 @@ def _patch_embed(monkeypatch):
     monkeypatch.setattr("rag.retrieval.to_pgvector", lambda vector: "[0]")
 
 
-def test_panel_k_is_the_minimum_and_a_larger_request_is_kept(monkeypatch):
-    """The hard-coded 6 is gone. The admin value is the floor."""
+def test_search_chunks_uses_the_k_it_is_given(monkeypatch):
+    """No floor. A direct call searches the k it was given."""
     _patch_embed(monkeypatch)
-    settings = {"retrieval_k": 6, "similarity_threshold": 0.48}
-    monkeypatch.setattr("chat.settings.load_settings", lambda: settings)
     captured = {}
     connection = Connection(captured)
-
     search_chunks(connection, "What should I do if delamination is found?", k=3, min_similarity=0.48, embedding_model="qwen3-embedding:0.6b")
-    assert captured["k"] == 6
-
+    assert captured["k"] == 3
     search_chunks(connection, "What should I do if delamination is found?", k=8, min_similarity=0.48, embedding_model="qwen3-embedding:0.6b")
     assert captured["k"] == 8
 
-    settings["retrieval_k"] = 4
-    search_chunks(connection, "What should I do if delamination is found?", k=3, min_similarity=0.48, embedding_model="qwen3-embedding:0.6b")
+
+def test_search_instructions_uses_the_saved_k_exactly(monkeypatch):
+    """The panel value is the search. A caller's k is not raised or kept."""
+    _patch_embed(monkeypatch)
+    monkeypatch.setattr("rag.retrieval.active_embedding_model", lambda conn: "qwen3-embedding:0.6b")
+    captured = {}
+
+    @contextmanager
+    def fake_db():
+        yield Connection(captured)
+
+    monkeypatch.setattr("mcp_server.server.read_only_db", fake_db)
+    saved = {"retrieval_k": 6, "similarity_threshold": 0.48}
+    monkeypatch.setattr("chat.settings.load_settings", lambda: saved)
+
+    result = search_instructions("What should I do if delamination is found?", k=3)
+    assert result.k_requested == 3
+    assert result.k_used == 6
+    assert captured["k"] == 6
+
+    result = search_instructions("What should I do if delamination is found?", k=8)
+    assert result.k_requested == 8
+    assert result.k_used == 6
+    assert captured["k"] == 6
+
+    saved["retrieval_k"] = 4
+    result = search_instructions("What should I do if delamination is found?", k=3)
+    assert result.k_requested == 3
+    assert result.k_used == 4
     assert captured["k"] == 4
 
 
@@ -90,21 +113,3 @@ def test_query_uses_the_active_index_model_not_the_saved_setting(monkeypatch):
     assert seen["model"] == "qwen3-embedding:0.6b"
 
 
-def test_search_instructions_reports_panel_k_when_the_model_asks_for_less(monkeypatch):
-    _patch_embed(monkeypatch)
-    monkeypatch.setattr("rag.retrieval.active_embedding_model", lambda conn: "qwen3-embedding:0.6b")
-    captured = {}
-
-    @contextmanager
-    def fake_db():
-        yield Connection(captured)
-
-    monkeypatch.setattr("mcp_server.server.read_only_db", fake_db)
-    monkeypatch.setattr(
-        "chat.settings.load_settings",
-        lambda: {"retrieval_k": 6, "similarity_threshold": 0.48},
-    )
-    result = search_instructions("What should I do if delamination is found?", k=3)
-    assert result.k_requested == 3
-    assert result.k_used == 6
-    assert len(result.results) >= 6

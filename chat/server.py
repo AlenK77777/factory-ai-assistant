@@ -66,6 +66,22 @@ def chat_model() -> str:
     return str(chat_settings()["chat_model"])
 
 
+def _settings_used() -> dict:
+    """Panel values that this answer actually used. No secrets and no system prompt."""
+    current = chat_settings()
+    return {
+        "chat_model": current["chat_model"],
+        "temperature": current["temperature"],
+        "think": current["think"],
+        "num_ctx": current["num_ctx"],
+        "keep_alive": current["keep_alive"],
+        "history_turns": current["history_turns"],
+        "retrieval_k": current["retrieval_k"],
+        "similarity_threshold": current["similarity_threshold"],
+        "general_knowledge": current["general_knowledge"],
+    }
+
+
 def ollama_problem() -> str | None:
     """None if Ollama is up and the configured chat model is pulled."""
     model = chat_model()
@@ -349,6 +365,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "language": result.language,
                 "model": chat_model(),
                 "settings_version": chat_settings()["version"],
+                "settings_used": _settings_used(),
                 "elapsed_s": elapsed,
                 "tools": [
                     {

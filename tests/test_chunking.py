@@ -2,7 +2,7 @@
 
 from rag.embeddings import EMBED_DIMENSIONS, EMBED_MODEL, to_pgvector
 from rag.retrieval import DEFAULT_K
-from rag.index_docs import CHUNK_OVERLAP, CHUNK_SIZE, document_title, split_text, text_to_embed
+from rag.index_docs import CHUNK_SIZE, document_title, split_text, text_to_embed
 
 SENTENCE = "Stop the lot and attach a red HOLD tag to every affected panel. "
 LONG_TEXT = "\n\n".join(SENTENCE * 4 for _ in range(10))
@@ -22,12 +22,14 @@ def test_prose_chunks_respect_the_size_limit():
     assert all(len(chunk) <= CHUNK_SIZE for chunk in chunks)
 
 
-def test_fallback_split_overlaps():
+def test_fallback_split_keeps_sentences_whole():
     # No headings and no blank lines, so only the size fallback applies.
     chunks = split_text(SENTENCE * 30)
     assert len(chunks) > 1
-    for previous, current in zip(chunks, chunks[1:]):
-        assert current[:10] in previous[-CHUNK_OVERLAP - 10 :]
+    for chunk in chunks:
+        assert chunk.startswith("Stop the lot")
+        assert chunk.endswith("panel.")
+        assert "tag," not in chunk or "HOLD tag to every" in chunk
 
 
 def test_no_text_is_lost():
@@ -72,6 +74,29 @@ def test_numbered_list_stays_in_one_chunk_even_past_the_size_limit():
     assert len(lists) == 1
     assert "7. action" in lists[0]
     assert "5. action" in lists[0]
+
+
+def test_order_hold_release_is_not_split_mid_sentence():
+    text = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "docs"
+        / "instructions"
+        / "order-hold-and-release.md"
+    ).read_text(encoding="utf-8")
+    chunks = split_text(text)
+    sentence = "remove the HOLD tag, and record who released the order and why."
+    assert any(sentence in chunk for chunk in chunks)
+    for chunk in chunks:
+        assert "tag, and record who" not in chunk.split("\n", 1)[-1][:20]
+        body = chunk
+        for line in chunk.splitlines():
+            if line.startswith("#"):
+                continue
+            body = line.strip()
+            break
+        if body.startswith("- "):
+            body = body[2:]
+        assert not body[:1].islower()
 
 
 def test_delamination_immediate_actions_include_step_5():
