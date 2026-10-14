@@ -14,11 +14,20 @@ $ErrorActionPreference = "Stop"
 if (-not $ProjectRoot) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
+# Windows PowerShell 5.1 has no $IsWindows. Join-Path is two arguments there, so paths stay portable.
+$onWindows = $env:OS -eq "Windows_NT"
+if (Test-Path variable:IsWindows) {
+    $onWindows = $IsWindows
+}
 if (-not $Python) {
-    $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+    if ($onWindows) {
+        $Python = Join-Path $ProjectRoot (Join-Path ".venv" (Join-Path "Scripts" "python.exe"))
+    } else {
+        $Python = Join-Path $ProjectRoot (Join-Path ".venv" (Join-Path "bin" "python"))
+    }
 }
 if (-not $Loader) {
-    $Loader = Join-Path $ProjectRoot "ingest\load_excel.py"
+    $Loader = Join-Path $ProjectRoot (Join-Path "ingest" "load_excel.py")
 }
 
 $Inbox = Join-Path $ProjectRoot "inbox"
@@ -57,14 +66,20 @@ function Format-ProcessArgument([string]$Text) {
 
 function Invoke-Loader {
     param([string[]]$Arguments)
-    $quoted = ($Arguments | ForEach-Object { Format-ProcessArgument $_ }) -join " "
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $Python
-    $info.Arguments = $quoted
     $info.UseShellExecute = $false
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $info.CreateNoWindow = $true
+    # pwsh on Linux splits arguments correctly from ArgumentList. Windows PowerShell 5.1 does not have it.
+    if (Get-Member -InputObject $info -Name ArgumentList -ErrorAction SilentlyContinue) {
+        foreach ($argument in $Arguments) {
+            [void]$info.ArgumentList.Add($argument)
+        }
+    } else {
+        $info.Arguments = ($Arguments | ForEach-Object { Format-ProcessArgument $_ }) -join " "
+    }
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $info
     [void]$proc.Start()
@@ -155,7 +170,7 @@ foreach ($item in $plan) {
         continue
     }
 
-    $tempCsv = Join-Path $env:TEMP ("inbox-rejected-" + [guid]::NewGuid().ToString() + ".csv")
+    $tempCsv = Join-Path ([System.IO.Path]::GetTempPath()) ("inbox-rejected-" + [guid]::NewGuid().ToString() + ".csv")
     $loaded = Invoke-Loader -Arguments @($Loader, "--file", $item.File.FullName, "--rejected-csv", $tempCsv)
     if ($loaded.Code -eq 2 -or $loaded.Code -eq $null) {
         Move-InboxFile -File $item.File -DestinationDir $Failed -CsvPath $tempCsv

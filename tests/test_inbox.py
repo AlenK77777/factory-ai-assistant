@@ -1,12 +1,14 @@
 """Inbox loader: column detection, one-file load, and the PowerShell flow."""
 
 import os
+import shutil
 import subprocess
 import sys
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from chat.event_log import get_log
 from ingest.load_excel import classify_columns, load_single
@@ -102,6 +104,15 @@ def test_file_load_reports_rejected_rows_without_a_second_workbook(tmp_path, mon
     assert "order_id is missing" in csv_path.read_text(encoding="utf-8")
 
 
+def _powershell() -> str:
+    """pwsh on Linux CI; Windows PowerShell when pwsh is not installed."""
+    for name in ("pwsh", "powershell"):
+        found = shutil.which(name)
+        if found:
+            return found
+    pytest.skip("PowerShell is not installed (neither pwsh nor powershell was found).")
+
+
 def _run_script(root: Path, env: dict | None = None) -> subprocess.CompletedProcess:
     child_env = os.environ.copy()
     child_env["PYTHONPATH"] = str(ROOT)
@@ -109,7 +120,7 @@ def _run_script(root: Path, env: dict | None = None) -> subprocess.CompletedProc
         child_env.update(env)
     return subprocess.run(
         [
-            "powershell",
+            _powershell(),
             "-NoProfile",
             "-File",
             str(SCRIPT),
