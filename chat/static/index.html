@@ -7,14 +7,16 @@
   <style>
     :root { color-scheme: light; }
     * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
       margin: 0;
       font: 16px/1.45 "Segoe UI", sans-serif;
       background: #eef1f4;
       color: #1c2430;
+      overflow: hidden;
     }
-    .layout { display: flex; min-height: 100vh; }
-    .chat { flex: 1; min-width: 0; }
+    .layout { display: flex; height: 100vh; overflow: hidden; }
+    .chat { flex: 1; min-width: 0; height: 100vh; overflow: auto; }
     main { max-width: 740px; margin: 0 auto; padding: 24px 16px 130px; }
     h1 { font-size: 22px; margin: 0 0 4px; }
     .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
@@ -127,11 +129,12 @@
     #back-to-chat { background: #15803d; }
     aside {
       width: 400px;
+      flex: none;
       background: #fff8e8;
       border-left: 4px solid #a15c07;
       padding: 16px 14px 32px;
+      height: 100vh;
       overflow: auto;
-      max-height: 100vh;
     }
     aside.collapsed { display: none; }
     .badge {

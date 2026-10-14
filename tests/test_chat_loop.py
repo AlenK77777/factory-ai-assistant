@@ -309,3 +309,6 @@ def test_page_sets_direction_per_message():
     assert "Thinking" in page
     assert 'setAttribute("aria-label", "Copy")' in page
     assert "#question { resize: none; }" in page
+    assert "overflow: hidden;" in page
+    assert ".chat { flex: 1; min-width: 0; height: 100vh; overflow: auto; }" in page
+    assert "height: 100vh;\n      overflow: auto;" in page
