@@ -1,6 +1,6 @@
 # Factory AI Assistant
 
-A home-lab project: an on-premise AI assistant for a PCB manufacturing plant.
+A home-lab project: an on-premise AI assistant for a factory.
 Shift managers, QA engineers and planners ask questions about production orders,
 defects and work instructions in **English, Russian or Hebrew**, and get answers
 from the plant's own data. Nothing leaves the computer.
